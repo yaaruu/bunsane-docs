@@ -1,0 +1,8 @@
+{
+  "label": "AI Agent Guide",
+  "position": 10,
+  "link": {
+    "type": "generated-index",
+    "description": "Comprehensive guides for AI agents to understand and work with BunSane framework. Copy these to your project for AI-assisted development."
+  }
+}
