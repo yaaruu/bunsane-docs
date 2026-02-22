@@ -5,50 +5,80 @@ import styles from './styles.module.css';
 
 type FeatureItem = {
   title: string;
-  Svg: React.ComponentType<React.ComponentProps<'svg'>>;
+  icon: string;
   description: ReactNode;
 };
 
 const FeatureList: FeatureItem[] = [
   {
-    title: 'Focus on Business Logic',
-    Svg: require('@site/static/img/undraw_deep-work_muov.svg').default,
+    title: 'ECS Architecture',
+    icon: '🧩',
     description: (
       <>
-        Bunsane provides a batteries-included backend framework so you can focus
-        on your business logic and ship faster.
-      </>
-    ),
-  },
-  {
-    title: 'GraphQL Generator & Rest API',
-    Svg: require('@site/static/img/undraw_building-blocks.svg').default,
-    description: (
-      <>
-        Bunsane includes a powerful GraphQL generator and REST API support, making it easy to build and scale your backend services.
+        Built on the Entity-Component-System pattern, providing a highly decoupled,
+        scalable, and maintainable architecture for complex backend applications.
       </>
     ),
   },
   {
     title: 'Powered by Bun',
-    Svg: require('@site/static/img/bun.svg').default,
+    icon: '🥟',
     description: (
       <>
-        Built on top of Bun, Bunsane leverages its high performance and modern features to deliver an exceptional developer experience.
+        Leverages Bun's incredible performance and modern TypeScript
+        runtime to deliver blazing fast execution.
+      </>
+    ),
+  },
+  {
+    title: 'GraphQL & REST',
+    icon: '⚡',
+    description: (
+      <>
+        Automatically generates GraphQL schemas and REST endpoints from your components
+        and services, saving you hours of boilerplate.
+      </>
+    ),
+  },
+  {
+    title: 'PostgreSQL Native',
+    icon: '🐘',
+    description: (
+      <>
+        First-class support for PostgreSQL with automatic table generation, migrations,
+        and optimized queries out of the box.
+      </>
+    ),
+  },
+  {
+    title: '100% Type-Safe',
+    icon: '🛡️',
+    description: (
+      <>
+        Written in TypeScript with strict typing. Catch errors at compile time and
+        enjoy excellent IDE autocompletion.
+      </>
+    ),
+  },
+  {
+    title: 'BunSane Studio',
+    icon: '🔍',
+    description: (
+      <>
+        Built-in development dashboard to browse entities, inspect components,
+        and debug your PostgreSQL data without leaving your workflow.
       </>
     ),
   },
 ];
 
-function Feature({title, Svg, description}: FeatureItem) {
+function Feature({title, icon, description}: FeatureItem) {
   return (
-    <div className={clsx('col col--4')}>
-      <div className="text--center">
-        <Svg className={styles.featureSvg} role="img" />
-      </div>
-      <div className="text--center padding-horiz--md">
-        <Heading as="h3">{title}</Heading>
-        <p>{description}</p>
+    <div className={clsx('col col--4', styles.featureCol)}>
+      <div className={styles.featureCard}>
+        <div className={styles.featureIcon}>{icon}</div>
+        <Heading as="h3" className={styles.featureTitle}>{title}</Heading>
+        <p className={styles.featureDesc}>{description}</p>
       </div>
     </div>
   );

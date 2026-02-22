@@ -5,11 +5,18 @@ sidebar_label: Archetypes
 
 # Archetypes
 
-Archetypes define structured views over entities by grouping related components together. They automatically generate GraphQL types and provide a higher-level API for working with data.
+An archetype groups related components together into a named shape -- like saying "a User is an entity with a name, an email, and a phone number." Archetypes also auto-generate GraphQL types, so you do not have to write schema definitions by hand.
+
+## Why Archetypes?
+
+Without archetypes, you would need to manually specify which components to include every time you return data from a GraphQL operation. Archetypes solve this by giving a name and structure to common entity shapes.
+
+When you define a `User` archetype, BunSane automatically:
+- Creates a `User` GraphQL type with fields matching your components
+- Creates a `UserInput` GraphQL input type for mutations
+- Provides helper methods for creating and updating entities
 
 ## Defining an Archetype
-
-Create an archetype by extending `BaseArcheType` and using the `@ArcheType` decorator:
 
 ```typescript
 import {
@@ -36,25 +43,26 @@ export type IUserArcheType = ArcheTypeOwnProperties<UserArcheTypeClass>;
 export const UserArcheType = new UserArcheTypeClass();
 ```
 
-Key points:
-- The class name typically ends with `ArcheTypeClass`
-- Export a type using `ArcheTypeOwnProperties<T>` for type inference
-- Export an instance of the archetype for use in services
+A few things to note:
+
+- **`@ArcheType("User")`** registers the archetype with the name "User" -- this becomes the GraphQL type name
+- **`@ArcheTypeField(Component)`** maps a component to a field on the archetype
+- **`{ nullable: true }`** marks a field as optional (it may not be present on every entity)
+- Export a **type** using `ArcheTypeOwnProperties<T>` for type inference in your services
+- Export an **instance** of the archetype for use in service decorators and operations
 
 ## The @ArcheType Decorator
 
-Register the archetype with a name:
+The decorator takes a name string that becomes the GraphQL type name:
 
 ```typescript
-// Using a string name
 @ArcheType("User")
 class UserArcheTypeClass extends BaseArcheType { }
 
-// Using an enum for consistency
+// You can also use an enum for consistency across your codebase
 enum ArchetypeKind {
     User = "User",
     Order = "Order",
-    Driver = "Driver",
 }
 
 @ArcheType(ArchetypeKind.User)
@@ -63,7 +71,7 @@ class UserArcheTypeClass extends BaseArcheType { }
 
 ## The @ArcheTypeField Decorator
 
-Map components to archetype fields:
+Each field maps a component to the archetype:
 
 ```typescript
 @ArcheType("Product")
@@ -79,11 +87,11 @@ export class ProductArcheTypeClass extends BaseArcheType {
 }
 ```
 
-Use `{ nullable: true }` for optional fields.
+Use `{ nullable: true }` for components that may not exist on every entity of this type.
 
-## Computed Fields with @ArcheTypeFunction
+## Computed Fields
 
-Add computed fields that resolve dynamically. These fields are calculated at query time and exposed in the GraphQL schema.
+Add fields that are calculated at query time using `@ArcheTypeFunction`. These appear in the GraphQL schema as regular fields.
 
 ```typescript
 import { ArcheTypeFunction } from "bunsane/core/ArcheType";
@@ -105,8 +113,7 @@ export class CustomerArcheTypeClass extends BaseArcheType {
         if (!name) return "";
 
         const { firstName, lastName, title } = name;
-        const parts = [title, firstName, lastName].filter(Boolean);
-        return parts.join(" ");
+        return [title, firstName, lastName].filter(Boolean).join(" ");
     }
 
     @ArcheTypeFunction({
@@ -115,21 +122,20 @@ export class CustomerArcheTypeClass extends BaseArcheType {
     async is_premium(entity: Entity) {
         const membership = await entity.get(MembershipComponent);
         if (!membership) return false;
-
         return membership.tier === "gold" || membership.tier === "platinum";
     }
 }
 ```
 
-The `returnType` option specifies the GraphQL return type. Common values include `"String"`, `"Int"`, `"Float"`, `"Boolean"`, and custom type names.
+The `returnType` option specifies the GraphQL return type. Common values: `"String"`, `"Int"`, `"Float"`, `"Boolean"`.
 
 ## Relations
 
-Archetypes support relationships using relation decorators.
+Archetypes support relationships between entity types.
 
 ### HasOne
 
-One-to-one relationship:
+A one-to-one relationship:
 
 ```typescript
 import { HasOne } from "bunsane/core/ArcheType";
@@ -146,7 +152,7 @@ export class UserArcheTypeClass extends BaseArcheType {
 
 ### HasMany
 
-One-to-many relationship:
+A one-to-many relationship:
 
 ```typescript
 import { HasMany } from "bunsane/core/ArcheType";
@@ -163,7 +169,7 @@ export class UserListResponseArcheTypeClass extends BaseArcheType {
 
 ### BelongsTo
 
-Inverse of HasOne/HasMany:
+The inverse side of HasOne or HasMany:
 
 ```typescript
 import { BelongsTo } from "bunsane/core/ArcheType";
@@ -178,11 +184,11 @@ export class UserDeviceArcheTypeClass extends BaseArcheType {
 }
 ```
 
-Note: Relations use string identifiers (archetype names) rather than direct class references.
+Relations use string identifiers (the archetype name) rather than direct class references.
 
 ## Creating Entities with Archetypes
 
-Use the `fill()` and `createEntity()` methods:
+Use `fill()` and `createEntity()` for a shorthand way to create entities:
 
 ```typescript
 const user = UserArcheType.fill({
@@ -191,48 +197,55 @@ const user = UserArcheType.fill({
     email: "john@example.com",
 }).createEntity();
 
-// Add additional components if needed
-user.add(PhoneComponent, { value: "+1234567890", verified: false });
+await user.save();
+```
 
+You can also add extra components after creating:
+
+```typescript
+const user = UserArcheType.fill({
+    name: "John Doe",
+    phone: "+1234567890",
+}).createEntity();
+
+user.add(PhoneComponent, { value: "+1234567890", verified: false });
 await user.save();
 ```
 
 ## Updating Entities
 
-Use the `updateEntity()` method:
+Use `updateEntity()` to update specific components on an existing entity:
 
 ```typescript
 const user = await Entity.FindById(userId);
-if (!user) {
-    throw new Error("User not found");
-}
+if (!user) throw new Error("User not found");
 
 const updated = await UserArcheType.updateEntity(user, {
     name: "Jane Doe",
-    domisili: { value: "New City" },
 });
 
 await updated.save();
 ```
 
-## Input Schema
+## Input Schemas
 
-Get a Zod schema for the archetype:
+Archetypes can generate Zod schemas for input validation:
 
 ```typescript
-// Full schema
+// Full schema for the archetype
 const schema = UserArcheType.getZodObjectSchema();
 
-// Input schema with partial/pick for mutations
+// Partial schema for update mutations
 const updateSchema = UserArcheType.getInputSchema().partial().pick({
     name: true,
-    domisili: true,
 });
 ```
 
+These schemas are useful as inputs to `@GraphQLOperation` decorators (see [Services](./service.md)).
+
 ## Registering Field Resolvers
 
-In services, register the archetype's field resolvers:
+For computed fields (`@ArcheTypeFunction`) and relations to work in GraphQL, register the archetype's field resolvers in your service:
 
 ```typescript
 class UserService extends BaseService {
@@ -243,11 +256,9 @@ class UserService extends BaseService {
 }
 ```
 
-This enables computed fields (`@ArcheTypeFunction`) to resolve in GraphQL queries.
-
 ## GraphQL Integration
 
-Archetypes automatically generate GraphQL types. The `CustomerArcheType` above generates:
+The `Customer` archetype defined above automatically generates these GraphQL types:
 
 ```graphql
 type Customer {
@@ -263,7 +274,7 @@ input CustomerInput {
 }
 ```
 
-Use archetypes as output types in GraphQL operations:
+Use archetypes as the output type in your GraphQL operations:
 
 ```typescript
 @GraphQLOperation({

@@ -1,19 +1,19 @@
 ---
 sidebar_position: 1
-sidebar_label: Entity Component
+sidebar_label: Entities & Components
 ---
 
-# Entity Component
+# Entities & Components
 
-BunSane uses an Entity-Component pattern for data storage. This approach provides flexibility in how data is structured and queried.
+This page is your reference for BunSane's data model: how to define components, create entities, query data, and use transactions.
 
 ## Components
 
-Components are data containers that can be attached to entities. Each component type represents a specific piece of data.
+Components are data containers that you attach to entities. Each component type becomes its own table in PostgreSQL.
 
 ### Defining Components
 
-Create components by extending `BaseComponent` and using the `@Component` decorator:
+Create a component by extending `BaseComponent` and marking it with `@Component`:
 
 ```typescript
 import { BaseComponent, CompData, Component } from "bunsane/core/components";
@@ -36,7 +36,7 @@ export class EmailComponent extends BaseComponent {
 
 ### The @CompData Decorator
 
-Fields marked with `@CompData` are persisted to the database:
+Fields marked with `@CompData()` are persisted to the database. Fields without it are ignored.
 
 ```typescript
 @Component
@@ -55,78 +55,114 @@ export class ProfileComponent extends BaseComponent {
 }
 ```
 
-Use `{ indexed: true }` for fields that are frequently queried to improve performance.
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `indexed` | `boolean` | Creates a database index on this field for faster queries |
+| `nullable` | `boolean` | Allows the field to be `null` in the database |
+
+Use `{ indexed: true }` on fields you frequently filter or sort by.
 
 ### Component Methods
 
-Components can include static or instance methods:
+Components can include helper methods:
 
 ```typescript
-import Cryptography from "./modules/Cryptography";
-
 @Component
 export class PasswordComponent extends BaseComponent {
     @CompData()
     value: string = "";
 
-    static makeHash(value: string) {
-        return Cryptography.makeHash(value);
+    static async makeHash(plaintext: string): Promise<string> {
+        return await Bun.password.hash(plaintext);
     }
 }
 ```
 
+### Tags
+
+A Tag is a component with no data fields. Tags are used to label entities by type:
+
+```typescript
+@Component
+export class UserTag extends BaseComponent {}
+
+@Component
+export class OrderTag extends BaseComponent {}
+```
+
+Tags are essential for queries -- they let you find "all users" or "all orders" without needing to know which specific data components are attached.
+
 ## Entities
 
-Entities are containers that hold components. Each entity has a unique ID and can have any combination of components attached.
+An entity is a container that holds components. Each entity has a unique UUID and can have any combination of components attached.
 
 ### Creating Entities
 
-Use `Entity.Create()` to create a new entity with components:
+Use `Entity.Create()` to create a new entity and chain `.add()` calls to attach components:
 
 ```typescript
 import { Entity } from "bunsane/core/Entity";
 
 const user = Entity.Create()
+    .add(UserTag, {})
     .add(NameComponent, { value: "John Doe" })
     .add(EmailComponent, { value: "john@example.com", verified: false });
 
 await user.save();
 ```
 
+The entity is not written to the database until you call `.save()`.
+
 ### Finding Entities
 
-Find an entity by its ID:
+Look up an entity by its ID:
 
 ```typescript
 const user = await Entity.FindById("entity-uuid-here");
 ```
 
-### Working with Components
+Returns `null` if no entity with that ID exists.
 
-Get component data from an entity:
+### Reading Component Data
+
+Get a component's data from an entity:
 
 ```typescript
 const nameComp = await entity.get(NameComponent);
 console.log(nameComp?.value);  // "John Doe"
 ```
 
-Set or update component data:
+The result is `null` if the entity does not have that component.
+
+### Updating Component Data
+
+Update an existing component:
 
 ```typescript
 await entity.set(NameComponent, { value: "Jane Doe" });
 await entity.save();
 ```
 
-Add a new component to an entity:
+### Adding Components
+
+Attach a new component to an existing entity:
 
 ```typescript
 entity.add(ProfilePictureComponent, { path: "/uploads/avatar.jpg" });
 await entity.save();
 ```
 
-### Saving Entities
+### Deleting Entities
 
-Always call `save()` to persist changes:
+```typescript
+await entity.delete();
+```
+
+### Saving
+
+Always call `save()` after making changes. Without it, changes stay in memory only:
 
 ```typescript
 await entity.save();
@@ -134,12 +170,17 @@ await entity.save();
 
 ## Querying Entities
 
-Use the `Query` class to find entities by their components:
+The `Query` class lets you find entities based on which components they have and what data those components contain.
 
 ```typescript
 import { Query } from "bunsane/query";
+```
 
-// Find all entities with a specific component
+### Basic Query
+
+Find all entities that have a specific component:
+
+```typescript
 const users = await new Query()
     .with(EmailComponent)
     .exec();
@@ -147,21 +188,23 @@ const users = await new Query()
 
 ### Filtering
 
-Filter by component field values:
+Filter by component field values using `Query.filters()` and `Query.filter()`:
 
 ```typescript
-// Using filter helper function
-import { FieldEqualsFilter } from "./utilities/QueryHelper";
-
 const users = await new Query()
-    .with(PhoneComponent, FieldEqualsFilter<PhoneComponent>("value", "+1234567890"))
+    .with(
+        EmailComponent,
+        Query.filters(
+            Query.filter("value", Query.filterOp.EQ, "john@example.com")
+        )
+    )
     .exec();
 ```
 
-Using Query's built-in filter methods:
+You can combine multiple filters on the same component:
 
 ```typescript
-const users = await new Query()
+const devices = await new Query()
     .with(
         UserDeviceComponent,
         Query.filters(
@@ -172,25 +215,41 @@ const users = await new Query()
     .exec();
 ```
 
-Available filter operators in `Query.filterOp`:
-- `EQ` - Equals
-- `NEQ` - Not equals
-- `GT` - Greater than
-- `GTE` - Greater than or equals
-- `LT` - Less than
-- `LTE` - Less than or equals
-- `LIKE` - Pattern matching
-- `IN` - In array
-- `NOT_IN` - Not in array
+### Filter Operators
+
+All available operators in `Query.filterOp`:
+
+| Operator | Description |
+|----------|-------------|
+| `EQ` | Equals |
+| `NEQ` | Not equals |
+| `GT` | Greater than |
+| `GTE` | Greater than or equal |
+| `LT` | Less than |
+| `LTE` | Less than or equal |
+| `LIKE` | Pattern matching (SQL LIKE) |
+| `IN` | Value is in array |
+| `NOT_IN` | Value is not in array |
 
 ### Multiple Components
 
-Query entities that have multiple components:
+Require entities to have several components:
 
 ```typescript
 const results = await new Query()
-    .with(WhatsappSessionComponent)
-    .with(WhatsappAuthenticatedTag)
+    .with(UserTag)
+    .with(EmailComponent)
+    .exec();
+```
+
+### Excluding Components
+
+Find entities that do **not** have a component:
+
+```typescript
+const unverified = await new Query()
+    .with(UserTag)
+    .without(VerifiedTag)
     .exec();
 ```
 
@@ -205,26 +264,33 @@ const users = await new Query()
     .exec();
 ```
 
+- `.sortBy(Component, "field", "ASC" | "DESC")` -- sort results
+- `.take(n)` -- limit to `n` results
+- `.offset(n)` -- skip the first `n` results
+
 ### Counting Results
+
+Get a count without loading all entities:
 
 ```typescript
 const count = await new Query()
-    .with(OrderComponent)
+    .with(OrderTag)
     .count();
 ```
 
 ## Transactions
 
-Use transactions for operations that require multiple writes:
+When you need multiple database operations to succeed or fail together, wrap them in a transaction:
 
 ```typescript
 import db from "bunsane/database";
 
 const result = await db.transaction(async (trx) => {
+    // All operations inside use the same transaction
     await device.set(UserDeviceComponent, {
         otp_code: "",
         verified: true,
-    }, { trx: trx });
+    }, { trx });
     await device.save(trx);
 
     const user = await Entity.FindById(userId, trx);
@@ -232,9 +298,9 @@ const result = await db.transaction(async (trx) => {
         throw new Error("User not found");
     }
 
-    const phone = await user.get(PhoneComponent, { trx: trx });
+    const phone = await user.get(PhoneComponent, { trx });
     if (phone) {
-        await user.set(PhoneComponent, { ...phone, verified: true }, { trx: trx });
+        await user.set(PhoneComponent, { ...phone, verified: true }, { trx });
         await user.save(trx);
     }
 
@@ -242,4 +308,4 @@ const result = await db.transaction(async (trx) => {
 });
 ```
 
-Pass the transaction object `trx` to entity operations to ensure they run within the same transaction.
+Pass the `trx` object to every entity operation inside the transaction. If any operation throws, the entire transaction is rolled back.

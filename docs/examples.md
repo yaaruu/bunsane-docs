@@ -1,10 +1,10 @@
 ---
-sidebar_position: 7
+sidebar_position: 6
 ---
 
 # Examples
 
-This page provides complete examples demonstrating how to build applications with BunSane.
+Complete working examples showing how to build applications with BunSane.
 
 ## Basic Todo Application
 
@@ -115,8 +115,8 @@ class TodoService extends BaseService {
     @GraphQLOperation({
         type: "Mutation",
         input: z.object({
-            title: z.string().min(1).max(200),
-            description: z.string().optional(),
+            title: z.string(),
+            description: z.string(),
         }),
         output: TodoArcheType,
     })
@@ -141,9 +141,9 @@ class TodoService extends BaseService {
         type: "Mutation",
         input: z.object({
             id: z.string(),
-            title: z.string().optional(),
-            description: z.string().optional(),
-            completed: z.boolean().optional(),
+            title: z.string(),
+            description: z.string(),
+            completed: z.boolean(),
         }),
         output: TodoArcheType,
     })
@@ -152,9 +152,7 @@ class TodoService extends BaseService {
         context: GraphQLContext
     ) {
         const todo = await Entity.FindById(args.id);
-        if (!todo) {
-            throw new Error("Todo not found");
-        }
+        if (!todo) throw new Error("Todo not found");
 
         const currentInfo = await todo.get(TodoInfoComponent);
         await todo.set(TodoInfoComponent, {
@@ -170,16 +168,12 @@ class TodoService extends BaseService {
 
     @GraphQLOperation({
         type: "Mutation",
-        input: z.object({
-            id: z.string(),
-        }),
+        input: z.object({ id: z.string() }),
         output: z.boolean(),
     })
     async deleteTodo(args: { id: string }, context: GraphQLContext) {
         const todo = await Entity.FindById(args.id);
-        if (!todo) {
-            return false;
-        }
+        if (!todo) return false;
         await todo.delete();
         return true;
     }
@@ -194,15 +188,12 @@ export default TodoService;
 import App from "bunsane/core/App";
 import { ServiceRegistry } from "bunsane/service";
 
-// Import components to ensure decorators are executed
 import "./components/TodoComponent";
-
 import TodoService from "./services/TodoService";
 
 export default class TodoAPI extends App {
     constructor() {
         super("TodoAPI", "1.0.0");
-
         ServiceRegistry.registerService(new TodoService(this));
     }
 }
@@ -219,7 +210,7 @@ app.init();
 
 ## User Authentication with REST
 
-Example showing REST endpoints for user authentication.
+An example showing REST endpoints for user registration and login.
 
 ### Components
 
@@ -251,7 +242,7 @@ export class NameComponent extends BaseComponent {
 }
 ```
 
-### Auth Service with REST Endpoints
+### Auth Service
 
 ```typescript title="src/services/AuthService.ts"
 import { BaseService, Post } from "bunsane/service";
@@ -261,20 +252,17 @@ import { Entity } from "bunsane/core/Entity";
 import { Query } from "bunsane/query";
 import { z } from "zod";
 import {
-    UserTag,
-    PasswordComponent,
-    EmailComponent,
-    NameComponent,
+    UserTag, PasswordComponent, EmailComponent, NameComponent,
 } from "../components/UserComponent";
 
 const RegisterSchema = z.object({
-    email: z.string().email(),
-    password: z.string().min(8),
-    name: z.string().min(2),
+    email: z.string(),
+    password: z.string(),
+    name: z.string(),
 });
 
 const LoginSchema = z.object({
-    email: z.string().email(),
+    email: z.string(),
     password: z.string(),
 });
 
@@ -327,7 +315,6 @@ class AuthService extends BaseService {
             );
         }
 
-        // Hash password (use proper hashing in production)
         const hashedPassword = await Bun.password.hash(password);
 
         const user = Entity.Create()
@@ -415,9 +402,9 @@ export default AuthService;
 
 ---
 
-## Entity Hooks Example
+## Entity Hooks
 
-Example showing how to use entity hooks for side effects.
+An example showing how to use entity hooks for side effects like logging and real-time notifications.
 
 ```typescript title="src/services/OrderService.ts"
 import { BaseService } from "bunsane/service";
@@ -437,7 +424,6 @@ class OrderService extends BaseService {
         OrderArcheType.registerFieldResolvers(this);
     }
 
-    // Hook triggered when an order is created
     @ComponentTargetHook("entity.created", {
         includeComponents: [OrderTag, OrderInfoComponent],
     })
@@ -450,11 +436,8 @@ class OrderService extends BaseService {
             orderId: orderEntity.id,
             customerId: infoComp?.customerId,
         });
-
-        // Add to processing queue, send notifications, etc.
     }
 
-    // Hook triggered when order status changes
     @ComponentTargetHook("entity.updated", {
         includeComponents: [OrderTag, OrderStatusComponent],
     })
@@ -468,7 +451,6 @@ class OrderService extends BaseService {
             newStatus: statusComp?.value,
         });
 
-        // Publish to subscribers
         this.app.pubSub.publish(`order.${orderEntity.id}.status`, {
             orderId: orderEntity.id,
             status: statusComp?.value,
@@ -481,7 +463,7 @@ class OrderService extends BaseService {
             customerId: z.string(),
             items: z.array(z.object({
                 productId: z.string(),
-                quantity: z.number().min(1),
+                quantity: z.number(),
             })),
         }),
         output: OrderArcheType,
@@ -494,12 +476,10 @@ class OrderService extends BaseService {
                 items: args.items,
                 createdAt: new Date(),
             })
-            .add(OrderStatusComponent, {
-                value: "pending",
-            });
+            .add(OrderStatusComponent, { value: "pending" });
 
         await order.save();
-        // The onOrderCreated hook will be triggered automatically
+        // The onOrderCreated hook fires automatically
         return order;
     }
 }
@@ -511,7 +491,7 @@ export default OrderService;
 
 ## Transaction Example
 
-Example showing how to use database transactions for atomic operations.
+An example showing database transactions for atomic operations like fund transfers.
 
 ```typescript title="src/services/PaymentService.ts"
 import { BaseService } from "bunsane/service";
@@ -532,7 +512,7 @@ class PaymentService extends BaseService {
         input: z.object({
             fromAccountId: z.string(),
             toAccountId: z.string(),
-            amount: z.number().positive(),
+            amount: z.number(),
         }),
         output: z.object({
             success: z.boolean(),
@@ -546,26 +526,19 @@ class PaymentService extends BaseService {
         const { fromAccountId, toAccountId, amount } = args;
 
         const result = await db.transaction(async (trx) => {
-            // Get source account
             const fromAccount = await Entity.FindById(fromAccountId, trx);
-            if (!fromAccount) {
-                throw new Error("Source account not found");
-            }
+            if (!fromAccount) throw new Error("Source account not found");
 
             const fromBalance = await fromAccount.get(BalanceComponent, { trx });
             if (!fromBalance || fromBalance.amount < amount) {
                 throw new Error("Insufficient funds");
             }
 
-            // Get destination account
             const toAccount = await Entity.FindById(toAccountId, trx);
-            if (!toAccount) {
-                throw new Error("Destination account not found");
-            }
+            if (!toAccount) throw new Error("Destination account not found");
 
             const toBalance = await toAccount.get(BalanceComponent, { trx });
 
-            // Deduct from source
             await fromAccount.set(
                 BalanceComponent,
                 { amount: fromBalance.amount - amount },
@@ -573,7 +546,6 @@ class PaymentService extends BaseService {
             );
             await fromAccount.save(trx);
 
-            // Add to destination
             await toAccount.set(
                 BalanceComponent,
                 { amount: (toBalance?.amount || 0) + amount },
@@ -581,7 +553,6 @@ class PaymentService extends BaseService {
             );
             await toAccount.save(trx);
 
-            // Create transaction record
             const txRecord = Entity.Create()
                 .add(TransactionTag, {})
                 .add(TransactionInfoComponent, {
@@ -595,10 +566,7 @@ class PaymentService extends BaseService {
             return txRecord.id;
         });
 
-        return {
-            success: true,
-            transactionId: result,
-        };
+        return { success: true, transactionId: result };
     }
 }
 
@@ -609,7 +577,7 @@ export default PaymentService;
 
 ## Authentication Decorator Pattern
 
-Example showing how to create a reusable `@RequireJWT` decorator for protecting GraphQL operations.
+A reusable `@RequireJWT` decorator for protecting GraphQL operations.
 
 ### AuthDecorator Utility
 
@@ -617,10 +585,6 @@ Example showing how to create a reusable `@RequireJWT` decorator for protecting 
 import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "bunsane/types/graphql.types";
 
-/**
- * Decorator that requires a valid JWT token for the operation.
- * Throws UNAUTHENTICATED error if no valid token is present.
- */
 export function RequireJWT() {
     return function (
         target: any,
@@ -630,7 +594,6 @@ export function RequireJWT() {
         const originalMethod = descriptor.value;
 
         descriptor.value = async function (...args: any[]) {
-            // GraphQL context is typically the second argument
             const context: GraphQLContext = args[1];
 
             if (!context.jwt?.payload?.user_id) {
@@ -646,9 +609,6 @@ export function RequireJWT() {
     };
 }
 
-/**
- * Decorator that requires specific roles for the operation.
- */
 export function RequireRole(...roles: string[]) {
     return function (
         target: any,
@@ -687,6 +647,7 @@ export function RequireRole(...roles: string[]) {
 import { BaseService } from "bunsane/service";
 import { GraphQLOperation } from "bunsane/gql";
 import { Entity } from "bunsane/core/Entity";
+import { Query } from "bunsane/query";
 import type { GraphQLContext } from "bunsane/types/graphql.types";
 import { RequireJWT, RequireRole } from "../utilities/AuthDecorator";
 
@@ -702,7 +663,6 @@ class UserService extends BaseService {
         output: UserArcheType,
     })
     async profile(args: {}, context: GraphQLContext) {
-        // JWT is guaranteed to be present due to @RequireJWT
         const userId = context.jwt.payload.user_id;
         return await Entity.FindById(userId);
     }
@@ -713,7 +673,6 @@ class UserService extends BaseService {
         output: [UserArcheType],
     })
     async listAllUsers(args: {}, context: GraphQLContext) {
-        // Only admins can access this
         return await new Query().with(UserTag).exec();
     }
 }
@@ -725,7 +684,7 @@ export default UserService;
 
 ## JWT Authentication Setup
 
-Example showing how to configure JWT authentication in the App.
+How to configure JWT authentication for your BunSane app.
 
 ```typescript title="src/App.ts"
 import App from "bunsane/core/App";
@@ -738,7 +697,6 @@ export default class SecureAPI extends App {
     constructor() {
         super("SecureAPI", "1.0.0");
 
-        // Configure JWT plugin
         const jwtPlugin = useJWT({
             signingKeyProviders: [createInlineSigningKeyProvider(JWT_SECRET)],
             tokenLookupLocations: [
@@ -764,14 +722,13 @@ export default class SecureAPI extends App {
 
         this.addYogaPlugin(jwtPlugin);
 
-        // Register services
         ServiceRegistry.registerService(new AuthService(this));
         ServiceRegistry.registerService(new UserService(this));
     }
 }
 ```
 
-Access the JWT payload in services:
+Then in your services, access the JWT payload through the context:
 
 ```typescript
 @GraphQLOperation({
@@ -779,7 +736,6 @@ Access the JWT payload in services:
     output: UserArcheType,
 })
 async profile(args: {}, context: GraphQLContext) {
-    // Check if user is authenticated
     if (!context.jwt?.payload?.user_id) {
         throw new GraphQLError("Authentication required", {
             extensions: { code: "UNAUTHENTICATED" },
