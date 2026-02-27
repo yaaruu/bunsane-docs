@@ -84,7 +84,16 @@ import { ApiDocs, ApiTags } from "bunsane/swagger";
 
 ### Upload
 ```typescript
+// Core upload system
 import { UploadManager, Upload, UploadField, UploadComponent } from "bunsane/upload";
+
+// REST upload utilities
+import { handleUpload, parseFormData, uploadResponse, uploadErrorResponse } from "bunsane/upload";
+import type { ParsedUpload, RestUploadOptions, RestUploadResult } from "bunsane/upload";
+
+// S3 storage provider
+import { S3StorageProvider, initializeS3Storage } from "bunsane/upload";
+import type { S3StorageConfig } from "bunsane/upload";
 ```
 
 ### Plugins
@@ -606,6 +615,39 @@ class UserService extends BaseService {
 }
 
 export default UserService;
+```
+
+### S3 Upload Storage
+
+```typescript
+import { initializeS3Storage } from "bunsane/upload";
+
+// In App constructor — registers "s3" storage provider
+await initializeS3Storage({
+    bucket: "my-app-uploads",
+    region: "us-east-1",
+    keyPrefix: "uploads/",
+});
+```
+
+### REST File Upload
+
+```typescript
+import { handleUpload, uploadResponse, uploadErrorResponse } from "bunsane/upload";
+
+@Post("/api/upload")
+async upload(req: Request) {
+    try {
+        const result = await handleUpload(req, {
+            config: { maxFileSize: 5_000_000, allowedMimeTypes: ["image/jpeg", "image/png"] },
+            maxFiles: 3,
+            storageProvider: "s3", // optional, defaults to "local"
+        });
+        return uploadResponse(result);
+    } catch (error) {
+        return uploadErrorResponse(error);
+    }
+}
 ```
 
 ### Key Points

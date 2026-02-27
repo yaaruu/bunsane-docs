@@ -437,6 +437,36 @@ class ProductService extends BaseService {
 }
 ```
 
+### REST File Upload
+
+Use the REST upload utilities for `multipart/form-data` file handling:
+
+```typescript
+import { BaseService, Post } from "bunsane/service";
+import { handleUpload, uploadResponse, uploadErrorResponse } from "bunsane/upload";
+
+class MediaService extends BaseService {
+    @Post("/api/media/upload")
+    async uploadMedia(req: Request) {
+        try {
+            const result = await handleUpload(req, {
+                config: {
+                    maxFileSize: 10_000_000,
+                    allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"],
+                },
+                maxFiles: 5,
+                storageProvider: "s3", // or omit for local storage
+            });
+            return uploadResponse(result);
+        } catch (error) {
+            return uploadErrorResponse(error);
+        }
+    }
+}
+```
+
+`handleUpload` parses the multipart form data, validates file constraints, and pipes each file through `UploadManager`. `uploadResponse` returns 200 (all success), 207 (partial), or 400 (all failed).
+
 ### REST with OpenAPI Documentation
 
 ```typescript

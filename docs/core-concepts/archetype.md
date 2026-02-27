@@ -89,12 +89,16 @@ export class ProductArcheTypeClass extends BaseArcheType {
 
 Use `{ nullable: true }` for components that may not exist on every entity of this type.
 
-## Computed Fields
+## Computed Fields (@ArcheTypeFunction)
 
-Add fields that are calculated at query time using `@ArcheTypeFunction`. These appear in the GraphQL schema as regular fields.
+Add fields that are calculated at query time using `@ArcheTypeFunction`. These appear in the GraphQL schema as regular fields but are resolved by calling a method on the archetype class instead of reading from a component.
+
+### Basic Usage
+
+Decorate a method with `@ArcheTypeFunction` and provide a `returnType`. The method receives the resolved `Entity` and returns a computed value.
 
 ```typescript
-import { ArcheTypeFunction } from "bunsane/core/ArcheType";
+import { ArcheType, ArcheTypeField, ArcheTypeFunction, BaseArcheType } from "bunsane/core/ArcheType";
 import { Entity } from "bunsane/core/Entity";
 
 @ArcheType("Customer")
@@ -105,20 +109,15 @@ export class CustomerArcheTypeClass extends BaseArcheType {
     @ArcheTypeField(MembershipComponent, { nullable: true })
     membership!: MembershipComponent;
 
-    @ArcheTypeFunction({
-        returnType: "String",
-    })
+    @ArcheTypeFunction({ returnType: "String" })
     async display_name(entity: Entity) {
         const name = await entity.get(PersonNameComponent);
         if (!name) return "";
-
         const { firstName, lastName, title } = name;
         return [title, firstName, lastName].filter(Boolean).join(" ");
     }
 
-    @ArcheTypeFunction({
-        returnType: "Boolean",
-    })
+    @ArcheTypeFunction({ returnType: "Boolean" })
     async is_premium(entity: Entity) {
         const membership = await entity.get(MembershipComponent);
         if (!membership) return false;
@@ -127,7 +126,106 @@ export class CustomerArcheTypeClass extends BaseArcheType {
 }
 ```
 
-The `returnType` option specifies the GraphQL return type. Common values: `"String"`, `"Int"`, `"Float"`, `"Boolean"`.
+### Return Types
+
+The `returnType` option is a GraphQL scalar or type name string. It is inserted verbatim into the generated schema, so the value must be a valid GraphQL type name.
+
+| `returnType` value | GraphQL type |
+|---|---|
+| `"String"` | `String` |
+| `"Int"` | `Int` |
+| `"Float"` | `Float` |
+| `"Boolean"` | `Boolean` |
+| `"Point"` (or any custom name) | Inserted verbatim into the schema |
+
+Always specify `returnType` explicitly. If omitted, BunSane reflects the TypeScript return type -- but async methods reflect as `Promise`, which falls back to `Any` in the generated schema.
+
+### Arguments
+
+`@ArcheTypeFunction` supports GraphQL arguments via the `args` option. Each entry specifies a `name`, a `type` constructor, and an optional `nullable` flag.
+
+```typescript
+import { ArcheTypeFunction } from "bunsane/core/ArcheType";
+import { Entity } from "bunsane/core/Entity";
+
+@ArcheTypeFunction({
+    returnType: "Float",
+    args: [
+        { name: "unit", type: String, nullable: true },
+    ],
+})
+async distance_to(entity: Entity, unit?: string) {
+    const location = await entity.get(LocationComponent);
+    if (!location) return null;
+    const factor = unit === "miles" ? 0.621371 : 1;
+    return location.distanceKm * factor;
+}
+```
+
+Argument `type` values map to GraphQL types as follows:
+
+| `type` value | GraphQL type |
+|---|---|
+| `String` | `String` |
+| `Number` | `Float` |
+| `Boolean` | `Boolean` |
+| `Date` | `Date` |
+| Custom class | Resolved from the type registry |
+
+Arguments with `nullable: false` (the default) are required -- the resolver throws if the argument is missing. Set `nullable: true` for optional arguments.
+
+### How It Differs from @ArcheTypeField
+
+| | `@ArcheTypeField` | `@ArcheTypeFunction` |
+|---|---|---|
+| Source | ECS component data from DB/cache | Method on the archetype class |
+| GraphQL input | Included in the generated input type | Excluded from input types |
+| Arguments | None | Supported via `args` option |
+| DataLoader | Batched automatically | Calls method directly per entity |
+
+### Registering Resolvers
+
+For `@ArcheTypeFunction` (and relations) to resolve in GraphQL, call `registerFieldResolvers()` in your service constructor. See [Registering Field Resolvers](#registering-field-resolvers) below.
+
+### Generated Schema Example
+
+This archetype definition:
+
+```typescript
+import { ArcheType, ArcheTypeField, ArcheTypeFunction, BaseArcheType } from "bunsane/core/ArcheType";
+import { Entity } from "bunsane/core/Entity";
+
+@ArcheType("Store")
+export class StoreArcheTypeClass extends BaseArcheType {
+    @ArcheTypeField(StoreInfoComponent)
+    info!: StoreInfoComponent;
+
+    @ArcheTypeFunction({ returnType: "Boolean" })
+    async is_open(entity: Entity) { ... }
+
+    @ArcheTypeFunction({
+        returnType: "Float",
+        args: [{ name: "unit", type: String, nullable: true }],
+    })
+    async distance_to(entity: Entity, unit?: string) { ... }
+}
+```
+
+Generates this GraphQL schema:
+
+```graphql
+type Store {
+    info: StoreInfoComponent!
+    is_open: Boolean
+    distance_to(unit: String): Float
+}
+
+input StoreInput {
+    info: StoreInfoComponentInput!
+}
+```
+
+Computed fields do not appear in the input type -- only `@ArcheTypeField` fields are included in the generated `StoreInput`.
 
 ## Relations
 
