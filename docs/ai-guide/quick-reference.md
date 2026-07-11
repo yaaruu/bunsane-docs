@@ -77,6 +77,12 @@ import type { EntityCreatedEvent, EntityUpdatedEvent, EntityDeletedEvent } from 
 import { ScheduledTask, ScheduleInterval, registerScheduledTasks } from "bunsane/scheduler";
 ```
 
+### Distributed Lock
+```typescript
+import { withLock } from "bunsane/core";
+// const { acquired, result } = await withLock("key", async () => {...}, { wait: 5000 });
+```
+
 ### Swagger
 ```typescript
 import { ApiDocs, ApiTags } from "bunsane/swagger";

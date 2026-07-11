@@ -32,10 +32,10 @@ bun add bunsane
 
 ## Configure Your Database
 
-BunSane connects to PostgreSQL using the `DATABASE_URL` environment variable. Create a `.env` file in your project root:
+BunSane connects to PostgreSQL using the `DB_CONNECTION_URL` environment variable. Create a `.env` file in your project root:
 
 ```bash title=".env"
-DATABASE_URL="postgresql://username:password@localhost:5432/myapp"
+DB_CONNECTION_URL="postgres://username:password@localhost:5432/myapp"
 ```
 
 Replace `username`, `password`, and `myapp` with your actual PostgreSQL credentials and database name. Make sure the database exists before starting your app.

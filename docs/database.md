@@ -8,13 +8,17 @@ BunSane uses PostgreSQL for all data storage. It manages database tables, indexe
 
 ## Connection
 
-Set the `DATABASE_URL` environment variable to connect to your PostgreSQL database:
+Set the `DB_CONNECTION_URL` environment variable to connect to your PostgreSQL database:
 
 ```bash title=".env"
-DATABASE_URL="postgresql://username:password@localhost:5432/myapp"
+DB_CONNECTION_URL="postgres://username:password@localhost:5432/myapp"
 ```
 
 BunSane reads this variable on startup. Make sure the database exists before starting your app.
+
+Alternatively, set the individual `POSTGRES_HOST` / `POSTGRES_USER` /
+`POSTGRES_PASSWORD` / `POSTGRES_DB` fields. See [Configuration](./configuration.md)
+for the full list of environment variables.
 
 ## Automatic Table Setup
 

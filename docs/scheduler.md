@@ -181,6 +181,52 @@ Configure locking via `SchedulerManager.updateConfig()`:
 
 Setting `lockTimeout` to a value greater than `0` causes the scheduler to retry acquiring the lock until the timeout elapses before giving up.
 
+## Manual Locking (`withLock`)
+
+The same advisory lock the scheduler uses for task exclusion is exposed as a standalone primitive. Use `withLock` to give any block of code the same cross-instance, run-once guarantee — a manual reindex, a one-off migration, or a cache rebuild that must not run on two pods at once.
+
+```typescript
+import { withLock } from "bunsane/core";
+
+const res = await withLock("rebuild-search-index", async () => {
+    await rebuildIndex();
+    return "done";
+});
+
+if (!res.acquired) {
+    // Another instance holds the lock — skip.
+} else {
+    console.log(res.result); // "done"
+}
+```
+
+`withLock(key, fn, options?)` acquires a PostgreSQL advisory lock for `key`, runs `fn`, and always releases the lock afterward — even if `fn` throws. Only one holder of a given `key` runs `fn` at a time across every process pointed at the same database. When the lock is unavailable it returns `{ acquired: false }` without running `fn`.
+
+It returns a `LockOutcome<T>`:
+
+- `{ acquired: true, result }` — the lock was taken and `fn` ran; `result` is its return value.
+- `{ acquired: false }` — the lock was held elsewhere (and `wait` elapsed, if set); `fn` did not run.
+
+### Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `wait` | `number` | `0` | Max ms to wait for the lock before giving up. `0` tries once. |
+| `retryInterval` | `number` | `100` | ms between attempts while waiting. |
+
+```typescript
+// Wait up to 5s for the lock, polling every 200ms.
+const res = await withLock("nightly-rollup", runRollup, { wait: 5000, retryInterval: 200 });
+```
+
+### Notes
+
+- **Shares the scheduler's lock session.** `withLock` and `@ScheduledTask` locks live in the same PostgreSQL session and namespace. Pick keys unlikely to collide with task IDs (`Class.method`).
+- **Not reentrant.** Calling `withLock` for a key already held by the current process returns `{ acquired: false }` (or waits, then gives up). Do not nest the same key.
+- **Crash-safe.** Locks are session-scoped; if the process dies, PostgreSQL releases them automatically.
+- **Honors scheduler config.** If distributed locking was disabled (`distributedLocking: false`), `withLock` always reports `acquired: true` and takes no real lock.
+- Unlike `pg_advisory_xact_lock`, this lock is **not** tied to a transaction — it is held only for the duration of `fn`. For a lock that auto-releases at transaction commit/rollback, use a transaction-scoped advisory lock inside `db.transaction()` instead.
+
 ## Scheduler Configuration
 
 Configure the scheduler globally via `SchedulerManager.updateConfig()`:
