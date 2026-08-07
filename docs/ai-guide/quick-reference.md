@@ -209,20 +209,39 @@ const active = await new Query()
     .without(DeletedTag)
     .exec();
 
-// Pagination
-const users = await new Query()
+// List page (hasNextPage — prefer over count for load-more)
+const q = new Query()
+    .with(UserTag)
+    .with(ProfileComponent)
+    .sortBy(ProfileComponent, "createdAt", "DESC")
+    .take(20);
+const users = await q.exec();
+const { hasNextPage } = q.getLastRouteInfo();
+
+// Next sorted page — sortedCursor (NOT .cursor(id) with sortBy — throws)
+const last = users[users.length - 1]!;
+const profile = await last.get(ProfileComponent);
+const token = Query.encodeSortedCursor(profile!.createdAt, last.id);
+const page2 = await new Query()
     .with(UserTag)
     .with(ProfileComponent)
     .sortBy(ProfileComponent, "createdAt", "DESC")
     .take(20)
-    .offset(40)
+    .sortedCursor(token)
     .exec();
 
-// Count
-const count = await new Query()
+// Eager load (avoid N+1)
+const batch = await new Query()
     .with(UserTag)
-    .count();
+    .eagerLoadComponents([ProfileComponent, EmailComponent])
+    .take(50)
+    .exec();
+
+// Exact count (expensive on large filtered sets)
+const count = await new Query().with(UserTag).count();
 ```
+
+See [List queries](../query-lists.md) and [Query optimization](./query-optimization.md).
 
 ## Filter Operators
 

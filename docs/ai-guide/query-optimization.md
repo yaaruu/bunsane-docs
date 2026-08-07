@@ -5,492 +5,324 @@ sidebar_label: Query Optimization
 
 # Query Optimization
 
-This guide covers efficient data retrieval patterns in BunSane. Proper query design is critical for application performance.
+Efficient list and lookup patterns for BunSane **0.6.x**. Use this as the default guide for AI agents and app authors.
 
-## Query Basics
+Also see: [List queries](../query-lists.md) · [QSP](../qsp.md) · [Configuration](../configuration.md)
+
+## Query basics
 
 ```typescript
 import { Query } from "bunsane/query";
 
-// Basic query - find all entities with a component
 const users = await new Query()
-    .with(UserTag)
-    .exec();
+  .with(UserTag)
+  .with(EmailComponent)
+  .take(20)
+  .exec();
 ```
 
-## Query Building Patterns
+## Building patterns
 
-### Pattern 1: Multiple Component Requirements
-
-Specify all required components to narrow results.
+### Multiple component requirements
 
 ```typescript
-// Find entities that have ALL specified components
+// Entities that have ALL of these components
 const verifiedUsers = await new Query()
-    .with(UserTag)
-    .with(EmailComponent)
-    .with(VerifiedTag)
-    .exec();
+  .with(UserTag)
+  .with(EmailComponent)
+  .with(VerifiedTag)
+  .exec();
 ```
 
-### Pattern 2: Filtering by Field Values
-
-Use `Query.filters()` and `Query.filter()` for field-level conditions.
+### Filtering by field values
 
 ```typescript
 const users = await new Query()
-    .with(
-        EmailComponent,
-        Query.filters(
-            Query.filter("value", Query.filterOp.EQ, "john@example.com")
-        )
-    )
-    .exec();
+  .with(
+    EmailComponent,
+    Query.filters(Query.filter("value", Query.filterOp.EQ, "john@example.com"))
+  )
+  .take(1)
+  .exec();
 ```
 
-### Pattern 3: Multiple Filters on Same Component
+### Multiple filters on the same component
+
+Same-component filters are **coalesced into one predicate group** (0.6.x) and pushed into membership INTERSECT branches where possible.
 
 ```typescript
 const products = await new Query()
-    .with(
-        ProductInventoryComponent,
-        Query.filters(
-            Query.filter("quantity", Query.filterOp.GT, 0),
-            Query.filter("sku", Query.filterOp.LIKE, "PROD-%")
-        )
+  .with(
+    ProductInventoryComponent,
+    Query.filters(
+      Query.filter("quantity", Query.filterOp.GT, 0),
+      Query.filter("sku", Query.filterOp.LIKE, "PROD-%")
     )
-    .exec();
+  )
+  .take(50)
+  .exec();
 ```
 
-### Pattern 4: Exclusion Queries
-
-Use `.without()` to exclude entities with certain components.
+### Exclusion
 
 ```typescript
-// Active users (not deleted)
 const activeUsers = await new Query()
-    .with(UserTag)
-    .without(SoftDeletedTag)
-    .exec();
+  .with(UserTag)
+  .without(SoftDeletedTag)
+  .take(50)
+  .exec();
 ```
 
-## Filter Operators Reference
+:::note
+`.without()` always uses the **legacy** path. It is never covered by [QSP](../qsp.md).
+:::
 
-| Operator | Description | Example |
-|----------|-------------|---------|
-| `EQ` | Equals | `Query.filter("status", Query.filterOp.EQ, "active")` |
-| `NEQ` | Not equals | `Query.filter("status", Query.filterOp.NEQ, "deleted")` |
-| `GT` | Greater than | `Query.filter("price", Query.filterOp.GT, 100)` |
-| `GTE` | Greater than or equal | `Query.filter("quantity", Query.filterOp.GTE, 1)` |
-| `LT` | Less than | `Query.filter("age", Query.filterOp.LT, 18)` |
-| `LTE` | Less than or equal | `Query.filter("price", Query.filterOp.LTE, 50)` |
-| `LIKE` | Pattern matching | `Query.filter("name", Query.filterOp.LIKE, "John%")` |
-| `IN` | Value in array | `Query.filter("status", Query.filterOp.IN, ["active", "pending"])` |
-| `NOT_IN` | Value not in array | `Query.filter("status", Query.filterOp.NOT_IN, ["deleted"])` |
+## Filter operators
 
-## Pagination and Sorting
+| Operator | Description |
+|----------|-------------|
+| `EQ` | Equals |
+| `NEQ` | Not equals |
+| `GT` / `GTE` / `LT` / `LTE` | Comparisons (numeric fields should be indexed) |
+| `LIKE` | Pattern (`John%` can use btree prefix; `%John%` usually cannot) |
+| `IN` / `NOT_IN` | Membership in array |
 
-### Basic Pagination
+## Pagination and sorting (do this)
+
+### Preferred list page — `take` + `hasNextPage`
+
+Explicit `.take(N)` fetches `LIMIT N+1`, trims to N, and sets `hasNextPage` so you **do not need** a second exact `.count()` for “load more” UIs.
 
 ```typescript
-const pageSize = 20;
-const pageNumber = 1;
+const q = new Query()
+  .with(OrderStatusComponent, statusFilters)
+  .with(OrderInfoComponent)
+  .with(OrderTimelineComponent)
+  .sortBy(OrderTimelineComponent, "createdAt", "DESC")
+  .take(20);
 
-const users = await new Query()
-    .with(UserTag)
-    .with(ProfileComponent)
-    .sortBy(ProfileComponent, "createdAt", "DESC")
-    .take(pageSize)
-    .offset(pageNumber * pageSize)
-    .exec();
+const items = await q.exec();
+const { hasNextPage, routed, surface, archetype } = q.getLastRouteInfo();
+// hasNextPage: true if another page exists
+// routed/surface: QSP diagnostics when BUNSANE_QSP=route
 ```
 
-### Counting Results
+Framework default LIMIT (when you never call `.take`) does **not** enable `hasNextPage`.
+
+### Sorted deep pages — `sortedCursor` (not plain `cursor`)
 
 ```typescript
-// Get total count for pagination UI
-const totalCount = await new Query()
-    .with(UserTag)
-    .count();
+// Page 1
+const page1 = await new Query()
+  .with(ProfileComponent)
+  .sortBy(ProfileComponent, "createdAt", "DESC")
+  .take(20)
+  .exec();
 
-// Calculate total pages
-const totalPages = Math.ceil(totalCount / pageSize);
+const last = page1[page1.length - 1]!;
+const profile = await last.get(ProfileComponent);
+const token = Query.encodeSortedCursor(profile!.createdAt, last.id);
+
+// Page 2 — keeps sort-driven / QSP keyset path
+const page2 = await new Query()
+  .with(ProfileComponent)
+  .sortBy(ProfileComponent, "createdAt", "DESC")
+  .take(20)
+  .sortedCursor(token)
+  .exec();
 ```
 
-## Optimization Strategies
+:::danger Wrong API
+`.sortBy(...).cursor(entityId)` **throws** at exec (0.6.x). Plain `cursor(id)` pages by **entity id order**, not sort order. Use `sortedCursor` for sorted lists, or drop `sortBy` to page by id only.
+:::
 
-### Strategy 1: Index Frequently Filtered Fields
+### When you need exact totals
 
-Ensure fields used in filters have `{ indexed: true }`.
+```typescript
+// Expensive on large filtered multi-component sets — full second scan
+const totalCount = await new Query().with(UserTag).count();
+```
+
+Prefer `hasNextPage` for infinite scroll. On QSP, set `BUNSANE_QSP_COUNT=n_plus_1` or `estimate` for list UIs.
+
+### Avoid deep OFFSET
+
+```typescript
+// Works but degrades as offset grows
+.take(20).offset(page * 20)
+```
+
+Prefer `sortedCursor` for large sorted tables.
+
+## Optimization strategies
+
+### 1. Index filter and sort fields
 
 ```typescript
 @Component
 export class EmailComponent extends BaseComponent {
-    @CompData({ indexed: true })  // Index for EQ lookups
-    value: string = "";
-
-    @CompData()  // No index needed - rarely filtered
-    verified: boolean = false;
+  @CompData({ indexed: true })
+  value: string = "";
 }
 ```
 
-### Strategy 2: Use Tags Instead of Boolean Filters
+Numeric indexed fields use a partial expression index; the engine restates the numeric predicate so the planner can use it (0.6.x).
 
-Tags are more efficient than filtering by boolean fields.
+### 2. Tags vs QSP
+
+Empty **tags** (no `@CompData`) are great for legacy membership (`.with(AdminTag)`), but:
+
+- Including a tag in `.with()` **breaks QSP coverage** (tags emit no projected columns).
+- For hot QSP lists, use a **list-only archetype** with only data components every row has — see [QSP](../qsp.md).
+
+### 3. Always bound result sets
 
 ```typescript
-// SLOWER - Boolean filter
-const verifiedUsers = await new Query()
-    .with(UserTag)
-    .with(
-        EmailComponent,
-        Query.filters(
-            Query.filter("verified", Query.filterOp.EQ, true)
-        )
-    )
-    .exec();
+// BAD
+await new Query().with(OrderTag).exec();
 
-// FASTER - Tag-based query
-const verifiedUsers = await new Query()
-    .with(UserTag)
-    .with(EmailVerifiedTag)  // Tag added when verified
-    .exec();
+// GOOD
+await new Query().with(OrderInfoComponent).take(100).exec();
 ```
 
-### Strategy 3: Limit Result Sets
-
-Always use `.take()` for potentially large result sets.
+### 4. Prevent N+1 — hydrate in bulk
 
 ```typescript
-// BAD - Could return thousands of rows
-const allOrders = await new Query()
-    .with(OrderTag)
-    .exec();
+const users = await new Query()
+  .with(UserTag)
+  .eagerLoadComponents([ProfileComponent, EmailComponent])
+  // or .populate()
+  .take(100)
+  .exec();
 
-// GOOD - Paginated
-const orders = await new Query()
-    .with(OrderTag)
-    .with(OrderInfoComponent)
-    .sortBy(OrderInfoComponent, "createdAt", "DESC")
-    .take(100)
-    .exec();
-```
-
-### Strategy 4: Use Count Before Large Operations
-
-Check count before executing potentially expensive operations.
-
-```typescript
-const pendingCount = await new Query()
-    .with(OrderTag)
-    .with(
-        OrderStatusComponent,
-        Query.filters(Query.filter("value", Query.filterOp.EQ, "pending"))
-    )
-    .count();
-
-if (pendingCount > 1000) {
-    // Process in batches
-    await processInBatches();
-} else {
-    // Process all at once
-    const orders = await query.exec();
+for (const user of users) {
+  const profile = await user.get(ProfileComponent); // cache hit if eager-loaded
 }
 ```
 
-### Strategy 5: Narrow Queries with Multiple Components
+If per-request `dbQueryCount` scales with page size, fix batching (eager load / DataLoaders), not INTERSECT SQL.
 
-Adding more `.with()` clauses narrows results more efficiently than adding filters.
+### 5. Batch related entities
 
 ```typescript
-// Less efficient - Filter after broad query
-const adminUsers = await new Query()
-    .with(UserTag)
-    .with(
-        RoleComponent,
-        Query.filters(Query.filter("value", Query.filterOp.EQ, "admin"))
-    )
-    .exec();
-
-// More efficient - Use tag for role
-const adminUsers = await new Query()
-    .with(UserTag)
-    .with(AdminTag)  // Entities are indexed by component presence
-    .exec();
+const orderIds = orders.map((o) => o.id);
+const items = await new Query()
+  .with(
+    LineItemComponent,
+    Query.filters(Query.filter("orderId", Query.filterOp.IN, orderIds))
+  )
+  .take(500)
+  .exec();
 ```
 
-## Common Query Patterns
+Do **not** run `new Query()...filter(fk, parent.id)` inside a per-row loop.
 
-### Find by Unique Field
+### 6. Sort-driven multi-component lists
+
+Fast path: **≥2** `.with` components, **exactly one** `sortBy` on a required component, no OR, no plain `cursor(id)`. Use `sortedCursor` for keyset.
+
+## Common patterns
+
+### Find by unique field
 
 ```typescript
 async function findUserByEmail(email: string): Promise<Entity | null> {
-    const results = await new Query()
-        .with(UserTag)
-        .with(
-            EmailComponent,
-            Query.filters(Query.filter("value", Query.filterOp.EQ, email))
-        )
-        .take(1)
-        .exec();
-
-    return results[0] || null;
+  const results = await new Query()
+    .with(UserTag)
+    .with(
+      EmailComponent,
+      Query.filters(Query.filter("value", Query.filterOp.EQ, email))
+    )
+    .take(1)
+    .exec();
+  return results[0] ?? null;
 }
 ```
 
-### Find by ID with Validation
+### Load-more list (no exact count)
 
 ```typescript
-async function findUserById(id: string): Promise<Entity> {
-    const user = await Entity.FindById(id);
-    if (!user) {
-        throw new GraphQLError("User not found", {
-            extensions: { code: "NOT_FOUND" }
-        });
-    }
+async function listOrders(pageSize = 20, cursorToken?: string) {
+  let q = new Query()
+    .with(OrderStatusComponent)
+    .with(OrderInfoComponent)
+    .with(OrderTimelineComponent)
+    .sortBy(OrderTimelineComponent, "createdAt", "DESC")
+    .take(pageSize);
 
-    // Optionally verify it's actually a user
-    const hasUserTag = await user.get(UserTag);
-    if (!hasUserTag) {
-        throw new GraphQLError("Entity is not a user", {
-            extensions: { code: "INVALID_TYPE" }
-        });
-    }
+  if (cursorToken) q = q.sortedCursor(cursorToken);
 
-    return user;
+  const items = await q.exec();
+  const { hasNextPage } = q.getLastRouteInfo();
+
+  let nextCursor: string | undefined;
+  if (hasNextPage && items.length > 0) {
+    const last = items[items.length - 1]!;
+    const tl = await last.get(OrderTimelineComponent);
+    nextCursor = Query.encodeSortedCursor(tl!.createdAt, last.id);
+  }
+
+  return { items, hasNextPage, nextCursor };
 }
 ```
 
-### Paginated List Query
+### Search with optional criteria
 
 ```typescript
-interface PaginationArgs {
-    page?: number;
-    pageSize?: number;
-    sortOrder?: "ASC" | "DESC";
-}
+async function searchUsers(criteria: { email?: string; verified?: boolean }) {
+  let query = new Query().with(UserTag);
 
-async function listUsers(args: PaginationArgs) {
-    const page = args.page || 0;
-    const pageSize = Math.min(args.pageSize || 20, 100); // Max 100
-    const sortOrder = args.sortOrder || "DESC";
+  if (criteria.email) {
+    query = query.with(
+      EmailComponent,
+      Query.filters(
+        Query.filter("value", Query.filterOp.LIKE, `%${criteria.email}%`)
+      )
+    );
+  }
+  if (criteria.verified === true) query = query.with(EmailVerifiedTag);
+  else if (criteria.verified === false) query = query.without(EmailVerifiedTag);
 
-    const [items, totalCount] = await Promise.all([
-        new Query()
-            .with(UserTag)
-            .with(ProfileComponent)
-            .sortBy(ProfileComponent, "createdAt", sortOrder)
-            .take(pageSize)
-            .offset(page * pageSize)
-            .exec(),
-        new Query()
-            .with(UserTag)
-            .count()
-    ]);
-
-    return {
-        items,
-        totalCount,
-        page,
-        pageSize,
-        totalPages: Math.ceil(totalCount / pageSize),
-    };
+  return query.take(100).exec();
 }
 ```
 
-### Search with Multiple Criteria
+ILIKE/`%…%` and `.without` stay on the **legacy** path (not QSP).
+
+## Aggregates and estimates
 
 ```typescript
-interface UserSearchCriteria {
-    email?: string;
-    name?: string;
-    verified?: boolean;
-}
-
-async function searchUsers(criteria: UserSearchCriteria) {
-    let query = new Query().with(UserTag);
-
-    if (criteria.email) {
-        query = query.with(
-            EmailComponent,
-            Query.filters(
-                Query.filter("value", Query.filterOp.LIKE, `%${criteria.email}%`)
-            )
-        );
-    }
-
-    if (criteria.name) {
-        query = query.with(
-            NameComponent,
-            Query.filters(
-                Query.filter("value", Query.filterOp.LIKE, `%${criteria.name}%`)
-            )
-        );
-    }
-
-    if (criteria.verified === true) {
-        query = query.with(EmailVerifiedTag);
-    } else if (criteria.verified === false) {
-        query = query.without(EmailVerifiedTag);
-    }
-
-    return await query.take(100).exec();
-}
-```
-
-## Transactions in Queries
-
-When reading entities that will be modified, use transactions.
-
-```typescript
-import db from "bunsane/database";
-
-const result = await db.transaction(async (trx) => {
-    // Read within transaction
-    const user = await Entity.FindById(userId, trx);
-    if (!user) throw new Error("User not found");
-
-    const balance = await user.get(BalanceComponent, { trx });
-
-    // Modify
-    await user.set(BalanceComponent, {
-        amount: balance.amount - 100
-    }, { trx });
-
-    await user.save(trx);
-
-    return user;
-});
-```
-
-## Performance Monitoring Tips
-
-1. **Log slow queries**: Add timing to track query performance
-2. **Use EXPLAIN**: For complex queries, analyze with PostgreSQL's EXPLAIN
-3. **Monitor result counts**: Track how many entities queries typically return
-4. **Index appropriately**: Add indexes based on actual query patterns
-
-```typescript
-// Example timing wrapper
-async function timedQuery<T>(name: string, queryFn: () => Promise<T>): Promise<T> {
-    const start = performance.now();
-    const result = await queryFn();
-    const duration = performance.now() - start;
-
-    if (duration > 100) {
-        console.warn(`Slow query "${name}": ${duration.toFixed(2)}ms`);
-    }
-
-    return result;
-}
-
-// Usage
-const users = await timedQuery("listActiveUsers", () =>
-    new Query()
-        .with(UserTag)
-        .without(SoftDeletedTag)
-        .take(100)
-        .exec()
-);
-```
-
-## Advanced Query Methods
-
-The Query class includes additional methods for specialized use cases:
-
-### Aggregate Functions
-
-```typescript
-// Sum a numeric field
 const totalRevenue = await new Query()
-    .with(OrderTag)
-    .with(OrderAmountComponent)
-    .sum(OrderAmountComponent, "amount");
+  .with(OrderAmountComponent)
+  .sum(OrderAmountComponent, "amount");
 
-// Average a numeric field
-const avgOrderValue = await new Query()
-    .with(OrderTag)
-    .with(OrderAmountComponent)
-    .average(OrderAmountComponent, "amount");
+// Fast approximate — not valid as a precise filtered multi-component total
+const approx = await new Query().with(UserTag).estimatedCount(UserTag);
 ```
 
-### Cursor-Based Pagination
-
-More efficient than offset-based pagination for large datasets:
+## Debugging
 
 ```typescript
-// First page
-const firstPage = await new Query()
-    .with(UserTag)
-    .with(ProfileComponent)
-    .sortBy(ProfileComponent, "createdAt", "DESC")
-    .take(20)
-    .exec();
-
-// Next page using cursor (last entity's ID)
-const lastId = firstPage[firstPage.length - 1]?.id;
-const nextPage = await new Query()
-    .with(UserTag)
-    .with(ProfileComponent)
-    .sortBy(ProfileComponent, "createdAt", "DESC")
-    .cursor(lastId, "after")
-    .take(20)
-    .exec();
-```
-
-### Eager Loading (Prevent N+1 Queries)
-
-```typescript
-// Preload components to avoid separate queries per entity
-const users = await new Query()
-    .with(UserTag)
-    .eagerLoadComponents([ProfileComponent, EmailComponent])
-    .take(100)
-    .exec();
-
-// Components are now cached on each entity
-for (const user of users) {
-    const profile = await user.get(ProfileComponent); // No additional query
-}
-```
-
-### Estimated Count (Fast Approximate)
-
-For very large tables where exact count is slow:
-
-```typescript
-// Uses PostgreSQL table statistics - much faster than count()
-const approxCount = await new Query()
-    .with(UserTag)
-    .estimatedCount(UserTag);
-```
-
-### Query Debugging
-
-```typescript
-// Enable debug logging for a query
-const users = await new Query()
-    .with(UserTag)
-    .debugMode(true)
-    .exec();
-
-// Get PostgreSQL EXPLAIN ANALYZE output
 const plan = await new Query()
-    .with(UserTag)
-    .with(ProfileComponent)
-    .explainAnalyze();
+  .with(OrderInfoComponent)
+  .with(OrderStatusComponent)
+  .sortBy(OrderInfoComponent, "orderNumber", "ASC")
+  .take(20)
+  .explainAnalyze(true);
 console.log(plan);
+
+const q = new Query().with(UserTag).take(10);
+await q.exec();
+console.log(q.getLastRouteInfo()); // { routed, surface, hasNextPage, archetype? }
 ```
 
 ## Summary
 
 | Do | Don't |
 |----|-------|
-| Use `.take()` for pagination | Return unlimited results |
-| Index fields used in filters | Index every field |
-| Use tags for boolean states | Filter by boolean fields |
-| Add multiple `.with()` clauses | Use complex filter logic |
-| Use transactions for read-modify-write | Read and write separately |
-| Check `.count()` before large ops | Process unknown-size results |
-| Use `cursor()` for large datasets | Use large `offset()` values |
-| Use `eagerLoadComponents()` for batch reads | Query components in loops |
+| Explicit `.take(N)` + `hasNextPage` | Exact `.count()` on every infinite-scroll page |
+| `sortedCursor` for sorted deep pages | `.sortBy` + `.cursor(id)` (throws) |
+| Index filter/sort fields | Filter unindexed JSON paths |
+| `eagerLoadComponents` / batch FK `IN` | `entity.get` / nested Query per list row |
+| List-only archetype for QSP hot paths | Expect tags / `.without` / multi-archetype joins on QSP |
+| Prefer one sort key for list screens | Multi-key sort unless required (slower path) |

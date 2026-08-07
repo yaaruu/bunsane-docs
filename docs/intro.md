@@ -50,7 +50,11 @@ BunSane is in an experimental stage and under active development. The API may ch
 
 ## Next Steps
 
-- **[Get started](/docs/getting-started)** -- Install BunSane and build your first app
-- **[Core Concepts](/docs/core-concepts)** -- Learn about entities, components, and queries
-- **[Examples](/docs/examples)** -- See complete working applications
-- Check out the [example project on GitHub](https://github.com/yaaruu/buroq-api)
+- **[Get started](/docs/getting-started)** — Install BunSane and build your first app
+- **[Core Concepts](/docs/core-concepts)** — Entities, components, and queries
+- **[List queries](/docs/query-lists)** — Filter, sort, paginate, avoid N+1 (`hasNextPage`, `sortedCursor`)
+- **[QSP](/docs/qsp)** — Optional read-model accelerator for hot multi-component lists
+- **[Query optimization](/docs/ai-guide/query-optimization)** — Patterns for services and AI agents
+- **[Configuration](/docs/configuration)** — Environment variables (DB, pool, QSP)
+- **[Examples](/docs/examples)** — Complete working applications
+- Example apps on GitHub: [buroq-api](https://github.com/yaaruu/buroq-api)

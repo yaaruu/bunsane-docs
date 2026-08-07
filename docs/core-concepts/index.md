@@ -256,27 +256,47 @@ const unverified = await new Query()
 ### Pagination and Sorting
 
 ```typescript
-const users = await new Query()
+// Preferred list page: explicit take → hasNextPage without a second count()
+const q = new Query()
+    .with(ProfileComponent)
+    .sortBy(ProfileComponent, "createdAt", "DESC")
+    .take(10);
+const users = await q.exec();
+const { hasNextPage } = q.getLastRouteInfo();
+
+// Deep sorted pages: sortedCursor (not plain cursor + sortBy)
+const last = users[users.length - 1]!;
+const profile = await last.get(ProfileComponent);
+const token = Query.encodeSortedCursor(profile!.createdAt, last.id);
+const page2 = await new Query()
     .with(ProfileComponent)
     .sortBy(ProfileComponent, "createdAt", "DESC")
     .take(10)
-    .offset(20)
+    .sortedCursor(token)
     .exec();
 ```
 
-- `.sortBy(Component, "field", "ASC" | "DESC")` -- sort results
-- `.take(n)` -- limit to `n` results
-- `.offset(n)` -- skip the first `n` results
+| Method | Use |
+|--------|-----|
+| `.sortBy(Component, "field", "ASC" \| "DESC")` | Sort by a component field (index the field) |
+| `.take(n)` | Limit to `n` results; enables `hasNextPage` via LIMIT n+1 |
+| `.offset(n)` | Skip rows (degrades on deep pages — prefer `sortedCursor`) |
+| `.sortedCursor(token)` | Keyset pagination for **sorted** lists |
+| `.cursor(id)` | Id-order pages only — **throws** if combined with `.sortBy()` |
+
+See [List queries](../query-lists.md) for N+1 and [QSP](../qsp.md) for optional read models.
 
 ### Counting Results
 
-Get a count without loading all entities:
+Exact count is a full cardinality scan — fine for small sets; avoid on every infinite-scroll request:
 
 ```typescript
 const count = await new Query()
     .with(OrderTag)
     .count();
 ```
+
+Prefer `hasNextPage` for “load more” UIs.
 
 ## Transactions
 

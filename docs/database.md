@@ -80,3 +80,15 @@ On startup, BunSane warms up a prepared statement cache with frequently-used que
 ## Connection Pooling
 
 Database connections are pooled automatically. BunSane reuses connections across requests, so you do not need to manage connection lifecycles yourself.
+
+Behind **PgBouncer transaction pooling**, set `DB_DISABLE_PREPARE=true` and put `statement_timeout` on the database role (not only in the app URL). See [Configuration](./configuration.md#running-behind-pgbouncer).
+
+## Component storage & indexes
+
+- Each `@Component` type is stored as JSONB rows (LIST-partitioned by type when `BUNSANE_PARTITION_STRATEGY=list`).
+- `@CompData({ indexed: true })` creates per-field expression indexes (btree / partial numeric / GIN by type).
+- Prefer querying through the [Query](./query-lists.md) builder rather than scanning raw JSONB without indexes.
+
+## Hot list reads (optional QSP)
+
+For stable multi-component admin/ops lists, [QSP](./qsp.md) can maintain an `rm_<archetype>` projection table and serve covered queries with a single index scan. Off by default (`BUNSANE_QSP=off`).

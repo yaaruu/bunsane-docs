@@ -51,11 +51,19 @@ into an internal config object and does **not** drive the live connection.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DB_QUERY_TIMEOUT` | `30000` (ms) | Client-side wall-clock timeout for `Query.exec/count/sum/average` and `Entity.save`. **JS-side only** — it raises a client error and rolls back the transaction, but does not by itself kill the server-side query (see `DB_STATEMENT_TIMEOUT`). |
-| `DB_CONNECTION_TIMEOUT` | `30` (s) | How long the pool waits for a free connection before rejecting. Consider `5` for user-facing services so requests fail fast instead of queueing. |
-| `DB_STATEMENT_TIMEOUT` | unset (ms) | Opt-in server-side `statement_timeout` appended to the connection URL, so PostgreSQL kills runaway queries. **Skipped under PgBouncer** (it rejects startup parameters) and under PGlite — set it on the database role instead when behind PgBouncer. |
-| `DB_DISABLE_PREPARE` | `false` | `true` disables Bun SQL's automatic server-side prepared statements. **Required behind PgBouncer in transaction pooling mode** — see [Running behind PgBouncer](#running-behind-pgbouncer). |
+| `DB_QUERY_TIMEOUT` | `30000` (ms) | Client-side wall-clock timeout for `Query.exec/count/sum/average` and `Entity.save`. Bounds how long the **caller** waits. Does not reliably kill the server-side statement alone — use server-side `statement_timeout` (see `DB_STATEMENT_TIMEOUT` / `ALTER ROLE`). |
+| `DB_REQUEST_TIMEOUT` | unset → `DB_QUERY_TIMEOUT` | Default budget for the **request** admission lane (ms). Covers wait for a permit **and** the query. Request-facing deploys should set this to a few seconds so overload **sheds** rather than queues forever. Size against your slowest legitimate request. |
+| `DB_BACKGROUND_TIMEOUT` | unset → `DB_QUERY_TIMEOUT` | Same for the **background** lane (scheduler, outbox, QSP backfill/reconcile) so shortening the request lane does not kill long background work. |
+| `DB_CONNECTION_TIMEOUT` | `30` (s) | Bun SQL **connection establishment** timeout (not a full-pool wait bound). Framework admission bounds queueing; see `DB_REQUEST_TIMEOUT`. |
+| `DB_POOL_IDLE_TIMEOUT` | `30` (**s**) | Close idle pooled connections after this many seconds (`0` = no limit). |
+| `DB_POOL_MAX_LIFETIME` | `600` (**s**) | Retire pooled connections after this lifetime (`0` = no limit). |
+| `DB_POOL_SATURATION_READY_MS` | `3000` (ms, `0` disables) | Continuous pool saturation before `/health/ready` fails with `db_pool` (does not fail liveness). |
+| `BUNSANE_DB_ADMISSION` | `on` | Bounded concurrency in front of the pool. `off` = passthrough. Armed after migrations in `App.init()`. |
+| `DB_ADMISSION_HEADROOM` | `1` | Connections kept outside the admission limit for health / headroom. |
+| `DB_STATEMENT_TIMEOUT` | unset (ms) | Opt-in server-side `statement_timeout` via connection URL `options`. **Inert behind PgBouncer** — use `ALTER ROLE … SET statement_timeout` instead. |
+| `DB_DISABLE_PREPARE` | `false` | `true` disables Bun SQL server-side prepared statements. **Required behind PgBouncer transaction pooling** — see [Running behind PgBouncer](#running-behind-pgbouncer). |
 | `DB_SAVE_PROFILE` | `false` | `true` logs per-phase `Entity.save` timings (`db`, `cache`, `hooks`, `total`). |
+| `DB_DDL_TIMEOUT` | `600000` (ms) | Budget for schema DDL (indexes, projection tables). Separate from query timeout. |
 
 ## Health checks
 
@@ -86,11 +94,43 @@ See [Health checks & liveness](#health-checks--liveness).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BUNSANE_DEFAULT_QUERY_LIMIT` | `10000` | Default `LIMIT` applied to `Query.exec()` calls with no `.take()`. `0` disables. Logs a warning when applied. |
+| `BUNSANE_DEFAULT_QUERY_LIMIT` | `10000` | Default `LIMIT` applied to `Query.exec()` with no `.take()`. `0` disables. Logs a warning when applied. Explicit `.take(N)` enables `hasNextPage` (LIMIT N+1) — see [List queries](./query-lists.md). |
 | `BUNSANE_USE_LATERAL_JOINS` | `true` | Use LATERAL joins for multi-component queries (PG12+). |
 | `BUNSANE_PARTITION_STRATEGY` | `list` | Component partition strategy: `list` or `hash`. Changing this on an existing database is guarded against data loss. |
-| `BUNSANE_USE_DIRECT_PARTITION` | `true` | Query partition tables directly. |
+| `BUNSANE_USE_DIRECT_PARTITION` | `true` | Query partition leaf tables directly (better for hot list paths). |
+| `BUNSANE_FORCE_PARTITION_RECREATE` | `false` | ⚠ Destructive — recreates partitions. Dev/migration only. |
 | `BUNSANE_DB_SLOW_MS` | framework default | Slow-query log threshold in milliseconds. |
+| `BUNSANE_COMPONENTS_DATA_GIN` | `false` | Whole-`data` GIN on `components`. Off by default (Query uses per-field indexes). Enable only for raw SQL `@>` on the whole payload. |
+| `BUNSANE_ORNODE_SINGLE_PASS` | `1` (on) | OR queries over a required base scan once with disjunctive EXISTS instead of N× UNION. Kill-switch: `0` / `false`. |
+
+### List pagination notes (API, not env)
+
+- Explicit `.take(N)` → SQL `LIMIT N+1` → `query.getLastRouteInfo().hasNextPage`
+- Plain `.cursor(entityId)` **cannot** be combined with `.sortBy()` — use `.sortedCursor(token)`
+- Exact `.count()` remains available and remains a full scan when called
+
+## Query Surface Planner (experimental)
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `BUNSANE_QSP` | `off` | `off` (zero footprint) \| `shadow` (parity, never serve) \| `route` (auto-promote and serve). Read at query time. |
+| `BUNSANE_QSP_ARCHETYPES` | (empty) | CSV of archetype names. **Empty = all eligible** — scope for first production rollout. |
+| `BUNSANE_QSP_COUNT` | `exact` | `exact` \| `n_plus_1` \| `estimate`. Prefer `n_plus_1` for list UIs. |
+| `BUNSANE_QSP_PROMOTE_MIN` | `50` | Clean shadow comparisons before READY (`route` only). |
+| `BUNSANE_QSP_BACKFILL_BATCH` | `5000` | Backfill batch size. |
+| `BUNSANE_QSP_BACKFILL_THROTTLE_MS` | `50` | Sleep between batches (ms). |
+| `BUNSANE_QSP_ENTITIES_ACCEL` | `false` | R1 generic entities accelerator. |
+| `BUNSANE_QSP_HYDRATE` | `off` | When `on`, serve fully-columnar components from the `rm_` row. |
+| `BUNSANE_QSP_HYDRATE_SHADOW` | `off` | Observe hydrate parity without serving; does not feed READY promotion. |
+
+Full operator guide: **[QSP](./qsp.md)**. Coverage requires an **exact** match between the query’s `.with` set and the archetype’s **projected** columns. Empty tags, `.without`, OR, ILIKE, and multi-archetype joins do not route. `startReconcileSweep()` is **not** started by `App` — start it in production when QSP ≠ `off`.
+
+## Distributed locking & scheduler
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BUNSANE_LOCK_BACKEND` | `auto` → `postgres` | `auto` \| `in-process` \| `postgres` (pooler-safe lease) \| `redis` \| `advisory` (session-pinned only). |
+| `BUNSANE_ALLOW_UNSAFE_ADVISORY_LOCK` | `false` | Bypass probe that blocks `advisory` behind transaction poolers (dangerous). |
 
 ## Cache
 
@@ -105,6 +145,10 @@ See [Health checks & liveness](#health-checks--liveness).
 | `CACHE_ENTITY_TTL` | `3600000` | Entity cache TTL (1 hour). |
 | `CACHE_COMPONENT_ENABLED` | `true` | Component cache. |
 | `CACHE_COMPONENT_TTL` | `1800000` | Component cache TTL (30 minutes). |
+| `CACHE_COMPONENT_NEGATIVE_ENABLED` | `false` | Cache “component missing” results. |
+| `CACHE_COMPONENT_NEGATIVE_TTL` | unset | Negative component cache TTL. |
+| `CACHE_RELATION_NEGATIVE_ENABLED` | `false` | Cache empty relation results. |
+| `CACHE_RELATION_NEGATIVE_TTL` | `60000` | Negative relation cache TTL (60s). |
 | `CACHE_QUERY_ENABLED` | `true` | Query result cache. |
 | `CACHE_QUERY_TTL` | `1800000` | Query cache TTL (30 minutes). |
 | `CACHE_QUERY_MAX_SIZE` | `10000` | Max cached query results. |

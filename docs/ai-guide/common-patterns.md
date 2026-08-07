@@ -218,35 +218,35 @@ async function findActiveUsersByRole(role: string) {
 }
 ```
 
-### Paginated Query with Total Count
+### Paginated list (prefer hasNextPage)
+
+Exact `.count()` on every page is often the slowest part of a list endpoint. Prefer `hasNextPage` for load-more UIs.
 
 ```typescript
-async function paginatedQuery<T>(
-    baseQuery: Query,
-    page: number,
-    pageSize: number
-): Promise<{ items: Entity[]; total: number; pages: number }> {
-    const [items, total] = await Promise.all([
-        baseQuery
-            .take(pageSize)
-            .offset(page * pageSize)
-            .exec(),
-        baseQuery.count(),
-    ]);
+async function listPage(
+    build: () => Query,
+    pageSize: number,
+    sortedCursorToken?: string
+): Promise<{ items: Entity[]; hasNextPage: boolean; nextCursor?: string }> {
+    let q = build().take(pageSize);
+    if (sortedCursorToken) q = q.sortedCursor(sortedCursorToken);
 
-    return {
-        items,
-        total,
-        pages: Math.ceil(total / pageSize),
-    };
+    const items = await q.exec();
+    const { hasNextPage } = q.getLastRouteInfo();
+    return { items, hasNextPage: hasNextPage ?? false };
 }
 
-// Usage
-const result = await paginatedQuery(
-    new Query().with(UserTag).with(ProfileComponent),
-    0,  // page
-    20  // pageSize
-);
+// When the UI truly needs total pages (expensive — cache if possible):
+async function paginatedWithTotal(build: () => Query, page: number, pageSize: number) {
+    const [items, total] = await Promise.all([
+        build().take(pageSize).offset(page * pageSize).exec(),
+        build().count(),
+    ]);
+    return { items, total, pages: Math.ceil(total / pageSize) };
+}
+```
+
+See [List queries](../query-lists.md).
 ```
 
 ### Date Range Query

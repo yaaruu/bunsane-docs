@@ -257,17 +257,22 @@ Add fields to existing component when:
 
 ## Document Index
 
-1. **[Component Best Practices](./component-best-practices.md)** - How to design optimal components
-2. **[Query Optimization](./query-optimization.md)** - Efficient data retrieval patterns
-3. **[Service Patterns](./service-patterns.md)** - Service implementation guidelines
-4. **[Common Patterns](./common-patterns.md)** - Reusable code patterns
-5. **[Quick Reference](./quick-reference.md)** - Copy-paste code snippets and **Minimal App Setup** guide
+1. **[Component Best Practices](./component-best-practices.md)** — How to design optimal components
+2. **[Query Optimization](./query-optimization.md)** — Efficient data retrieval (0.6.x: hasNextPage, sortedCursor, N+1)
+3. **[List queries](../query-lists.md)** — Product list endpoints checklist
+4. **[QSP](../qsp.md)** — Read-model coverage limits (tags, multi-archetype)
+5. **[Service Patterns](./service-patterns.md)** — Service implementation guidelines
+6. **[Common Patterns](./common-patterns.md)** — Reusable code patterns
+7. **[Quick Reference](./quick-reference.md)** — Copy-paste snippets and minimal app setup
 
 ## Critical Rules for AI Agents
 
-1. **Components must be atomic** - No nested objects within `@CompData()` fields
+1. **Components must be atomic** — No nested objects within `@CompData()` fields
 2. **Always call `entity.save()`** after modifications
 3. **Use transactions** for operations involving multiple entity modifications
 4. **Register field resolvers** for archetypes with computed fields
 5. **Validate input** with Zod schemas before processing
 6. **Handle errors** by returning `GraphQLError` with appropriate codes
+7. **List APIs** — Prefer `.take(N)` + `getLastRouteInfo().hasNextPage`; never `.sortBy` + `.cursor(id)` (throws); use `sortedCursor` for sorted pages
+8. **N+1** — Use `eagerLoadComponents` / DataLoaders; if `dbQueryCount` scales with page size, fix batching
+9. **QSP** — Empty tags and `.without` break coverage; use list-only archetypes for hot paths (see [QSP](../qsp.md))

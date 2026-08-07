@@ -75,30 +75,53 @@ async getUser(args: { id: string }, context: GraphQLContext) {
 }
 ```
 
-### List Query with Pagination
+### List query with pagination
+
+Prefer **load-more** (`hasNextPage` + optional `sortedCursor`) over offset + exact count on every request. See [List queries](../query-lists.md).
 
 ```typescript
 @GraphQLOperation({
     type: "Query",
     input: z.object({
-        page: z.number().min(0).default(0),
         pageSize: z.number().min(1).max(100).default(20),
+        cursor: z.string().optional(), // sortedCursor token from previous page
     }),
-    output: [UserArcheType],  // Array output
+    output: z.object({
+        items: z.array(z.any()), // or your connection type
+        hasNextPage: z.boolean(),
+        nextCursor: z.string().optional(),
+    }),
 })
 async listUsers(
-    args: { page: number; pageSize: number },
+    args: { pageSize: number; cursor?: string },
     context: GraphQLContext
 ) {
-    return await new Query()
+    let q = new Query()
         .with(UserTag)
         .with(ProfileComponent)
         .sortBy(ProfileComponent, "createdAt", "DESC")
-        .take(args.pageSize)
-        .offset(args.page * args.pageSize)
-        .exec();
+        .eagerLoadComponents([ProfileComponent])
+        .take(args.pageSize);
+
+    if (args.cursor) q = q.sortedCursor(args.cursor);
+
+    const items = await q.exec();
+    const { hasNextPage } = q.getLastRouteInfo();
+
+    let nextCursor: string | undefined;
+    if (hasNextPage && items.length > 0) {
+        const last = items[items.length - 1]!;
+        const profile = await last.get(ProfileComponent);
+        nextCursor = Query.encodeSortedCursor(profile!.createdAt, last.id);
+    }
+
+    return { items, hasNextPage: hasNextPage ?? false, nextCursor };
 }
 ```
+
+:::note
+`.sortBy(...).cursor(entityId)` throws. Use `sortedCursor` for sorted lists.
+:::
 
 ### Mutation with ArcheType Input Schema
 
