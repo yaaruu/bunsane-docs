@@ -111,7 +111,7 @@ Key-index behaviour (names, what `@CompData({ indexed: true })` creates, reconci
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `BUNSANE_QSP` | `off` | `off` \| `shadow` (parity, never serve) \| `route` (serve when READY). `shadow` ↔ `route` and either → `off` are live. `off` → `shadow`/`route` needs a restart. |
-| `BUNSANE_QSP_ARCHETYPES` | empty | CSV scope. Empty = every eligible archetype (first covered query backfills). A CSV pre-registers those names as `DISABLED`; call `runBackfill`. See [QSP](./qsp.md). |
+| `BUNSANE_QSP_ARCHETYPES` | empty | CSV scope. Empty = every eligible archetype (first covered query backfills). A CSV starts backfilling those archetypes at boot instead (new `projection_state` rows go straight to `BACKFILLING`); an existing row keeps its status. See [QSP](./qsp.md). |
 | `BUNSANE_QSP_COUNT` | `exact` | `exact` \| `n_plus_1` \| `estimate`. |
 | `BUNSANE_QSP_PROMOTE_MIN` | `50` | Clean shadow comparisons before READY. |
 | `BUNSANE_QSP_BACKFILL_BATCH` | `5000` | Backfill batch size. |

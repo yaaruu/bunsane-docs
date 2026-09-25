@@ -119,7 +119,7 @@ Status is `DISABLED`, `BACKFILLING`, `SHADOW`, or `READY`. There is no `NONE`.
 
 **Unscoped** (`BUNSANE_QSP_ARCHETYPES` empty): the first covered list query calls `ensureProjection`, inserts `projection_state` as `BACKFILLING`, and starts backfill.
 
-**Scoped** (`BUNSANE_QSP_ARCHETYPES=OrderList`): `App.init` creates the `rm_` table and inserts the row as `DISABLED`. `ensureProjection` then returns immediately, because the descriptor is already registered, so the first query does **not** backfill. Dual-write skips `DISABLED`. Call `runBackfill` yourself after boot:
+**Scoped** (`BUNSANE_QSP_ARCHETYPES=OrderList`): `App.init` creates the `rm_` table and key indexes for each listed archetype. An archetype with **no existing** row gets one inserted `BACKFILLING`, and its backfill starts in the background right away — same as the unscoped path, just at boot instead of on the first query. An existing row keeps its status: `DISABLED` only happens if something sets it explicitly (an operator's rollback), and it survives restarts. A row still `BACKFILLING` because an instance died mid-scan resumes from its watermark on the next boot.
 
 ```typescript
 import { runBackfill } from "bunsane/database/projection";
@@ -127,7 +127,9 @@ import { runBackfill } from "bunsane/database/projection";
 await runBackfill("OrderList");
 ```
 
-`runBackfill` sets `BACKFILLING`, fills `rm_orderlist`, then sets `SHADOW`. It returns without writing if the descriptor was not registered, or if another instance holds the postgres lease `qsp-backfill-OrderList`. That lease is `getDistributedLock()` (the postgres lease table), not `pg_advisory_lock`.
+You do not need to call `runBackfill` yourself for a new scoped archetype — boot does it. Call it to kick a row that predates this behavior and is stuck `DISABLED`, or to re-run a backfill on demand. `runBackfill` sets `BACKFILLING`, fills `rm_orderlist`, then sets `SHADOW`. It returns without writing if the descriptor was not registered, or if another instance holds the postgres lease `qsp-backfill-OrderList`. That lease is `getDistributedLock()` (the postgres lease table), not `pg_advisory_lock`.
+
+`ProjectionManager.instance.awaitBackfills()` resolves once every backfill this process started has settled — handy in tests and scripts.
 
 1. **SHADOW** still serves legacy and compares id-set, order, and count.
 2. **READY** (`route` only): after `BUNSANE_QSP_PROMOTE_MIN` clean comparisons, serves from `rm_`.
@@ -157,8 +159,8 @@ The sweep samples `rm_` rows, recomputes them from `components`, and repairs dri
 2. Pick one hot list with a stable multi-component set.
 3. Declare a list-only archetype (no empty tags, no rare optionals).
 4. Align the `Query` builder to that exact set. One sort key.
-5. Scope: `BUNSANE_QSP_ARCHETYPES=OrderList`. Restart so `init()` creates `rm_orderlist` as `DISABLED`.
-6. Staging: `BUNSANE_QSP=shadow`, `BUNSANE_QSP_COUNT=n_plus_1`. Confirm the sweep started. Then `await runBackfill("OrderList")` from `bunsane/database/projection`. Do not call `startReconcileSweep` yourself inside `App`.
+5. Scope: `BUNSANE_QSP_ARCHETYPES=OrderList`. Restart so `init()` creates `rm_orderlist`, inserts a `BACKFILLING` row, and starts the backfill.
+6. Staging: `BUNSANE_QSP=shadow`, `BUNSANE_QSP_COUNT=n_plus_1`. Confirm the sweep started and the backfill reaches `SHADOW` (poll `projection_state`, or `await ProjectionManager.instance.awaitBackfills()`). Do not call `startReconcileSweep` yourself inside `App`.
 7. Soak until `qspPlannerMetrics.shadowDivergenceTotal` stays `0` and `shadowComparedTotal` is moving. These counters are in-process, not Prometheus.
 8. Flip `BUNSANE_QSP=route` without a restart. Confirm `getLastRouteInfo().routed === true` and `surface === "rm"`.
 9. Optional: hydrate shadow, then `BUNSANE_QSP_HYDRATE=on`.

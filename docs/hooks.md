@@ -20,7 +20,7 @@ There are six hook event types, split into two categories.
 | `component.updated` | `ComponentUpdatedEvent` | Inside `entity.set()`, and that call awaits the hook |
 | `component.removed` | `ComponentRemovedEvent` | After `entity.remove()`, not awaited |
 
-`save()` and `delete()` return before entity hooks run. Sync and `async: true` only order hooks relative to each other inside that later pass. Do not use a hook for work that must finish before `save()` resolves. Shutdown still drains queued hook work. `set()` is the exception: it awaits `component.updated` before it returns. Hook errors are logged and do not fail the entity call.
+`save()` and `delete()` return before entity hooks run. Sync and `async: true` only order hooks relative to each other inside that later pass. Do not use a hook for work that must finish before `save()` resolves. Shutdown still drains queued hook work. `set()` is the exception: it awaits `component.updated` before it returns. Hook errors are logged and do not fail the entity call. This holds even when you pass your own `trx` to `save(trx)` / `saveMany(..., { trx })`, including a `trx.savepoint(...)` taken on it: the hook waits for that transaction's (or savepoint's) `COMMIT`, and never runs if it rolls back. The one exception is a handle with no tracked end — a `sql.reserve()` connection, or a transaction handle used after it already finished — where there is no commit to wait for, so the hook still runs right after `save()` returns.
 
 ## Event Properties
 

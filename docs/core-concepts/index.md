@@ -193,7 +193,7 @@ await entity.save();
 await Entity.saveMany([first, second]);
 ```
 
-A dirty save bumps `entities.updated_at` and the changed component row's `updated_at`. `created_at` is kept. Dirty flags clear only after that transaction commits, including read-model sync (0.7+).
+A dirty save bumps `entities.updated_at` and the changed component row's `updated_at`. `created_at` is kept. Dirty flags clear as soon as the save's own statements succeed, including read-model sync — a second `save()` in the same transaction is an update, not a duplicate insert. A rollback of that transaction (opened through `db` / `getDb()` / `dbTransaction`) restores the flags, so a retried `save()` reissues every statement.
 
 Pass a caller-owned transaction as `save(trx)`. That handle takes no extra admission permit. Pass `{ trx }` into `get` and `set`. `FindById` takes the transaction as a second argument: `Entity.FindById(id, trx)`.
 

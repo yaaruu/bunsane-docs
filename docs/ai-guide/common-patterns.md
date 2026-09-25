@@ -76,7 +76,7 @@ await user.save();
 
 `FindById` returns `null` for a blank or unknown id. Pass `trx` when you are inside a transaction: `Entity.FindById(id, trx)` and `user.get(Ctor, { trx })`.
 
-Dirty flags change only after the transaction commits, including QSP and read-model sync. A rolled-back `save()` is not persisted. Retry it.
+Dirty flags flip as soon as that save's own statements succeed — a second `save()` of the same entity inside the same transaction is an update, not a duplicate insert. If the transaction then rolls back, the in-memory flags are restored, so a retried `save()` reissues every statement (the QSP / read-model rows themselves are already rolled back by Postgres). That applies to any transaction opened through `db` / `getDb()` / `dbTransaction`, including a `trx.savepoint(...)` taken on one of those. A handle with no tracked end — `sql.reserve()`, or a transaction handle used after it already finished — keeps its flags applied regardless.
 
 ## Transactions
 

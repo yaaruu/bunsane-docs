@@ -132,6 +132,8 @@ This is not a no-code upgrade. Search the app before you boot `main` against pro
 | `sortByCreatedAt` / `sortByUpdatedAt` combined with `.with()`, OR, or `.without()` exclude soft-deleted entities | Lists that still showed deleted rows | Filter in the service if you truly need them. They are not in the index plan |
 | First boot builds a `bk_` index per indexed scalar, plus `created_at` / `updated_at` on `entities` | Disk and I/O budget; lists that are correct but slow until the background build finishes | Tables under `BUNSANE_INDEX_SYNC_MAX_ROWS` (100000) index during `init()`. Larger tables index in the background (`CREATE INDEX CONCURRENTLY`). Legacy `idx_*_btree` / `_btree_date` / `_numeric` / scalar `_gin` drop only after the replacement is valid |
 | `BUNSANE_INDEX_SYNC_MAX_ROWS` and `BUNSANE_ENTITY_SORT_PROBE` are validated at boot | A typo'd value | Non-negative integer, and a positive integer, respectively. Invalid values fail `init()` |
+| Scoped QSP rollout (`BUNSANE_QSP_ARCHETYPES` set) auto-backfills at boot instead of staying `DISABLED` | Deployments that relied on a scoped archetype staying inert until a manual `runBackfill` | Nothing to do for a new row. A row already `DISABLED` from before this fix keeps that status — run `runBackfill("<Archetype>")` once, or flip it by hand and restart |
+| Caller-transaction save hooks (cache invalidation, `entity.created`/`entity.updated`) wait for the caller's `COMMIT`, and are skipped on rollback | Code passing `save(trx)` / `saveMany(..., { trx })` that assumed the hook fired immediately | None if you only observed effects after commit already. If you relied on a hook firing before the outer transaction committed, move that work out of the hook |
 
 ```typescript
 // Throws on 0.9:
