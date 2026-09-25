@@ -5,717 +5,402 @@ sidebar_label: Common Patterns
 
 # Common Patterns
 
-This guide provides reusable code patterns for common scenarios in BunSane applications.
+Recipes you can copy. Imports come from `"bunsane"` unless the snippet says otherwise. Rules and pitfalls: [Query optimization](./query-optimization.md) · [Service patterns](./service-patterns.md) · [Component best practices](./component-best-practices.md).
 
-## Entity Patterns
-
-### Create Entity with Multiple Components
+## Create and update
 
 ```typescript
-const user = Entity.Create()
-    .add(UserTag, {})
-    .add(NameComponent, { value: "John Doe" })
-    .add(EmailComponent, { value: "john@example.com", verified: false })
-    .add(ProfileComponent, {
-        avatarUrl: "",
-        bio: "",
-        createdAt: new Date(),
-    });
+import { Entity } from "bunsane";
 
+const user = Entity.Create()
+  .add(UserTag, {})
+  .add(NameComponent, { value: "John Doe" })
+  .add(EmailComponent, { value: "john@example.com", verified: false });
 await user.save();
 ```
 
-### Create Using Archetype
+`Create()` assigns a UUID v7. `CreateWithId("")` still assigns a new id. `add()` is synchronous and returns the entity. Nothing hits the database until `save()`.
+
+Archetype `fill()` takes field names and component data, not flat scalars:
 
 ```typescript
 const user = UserArcheType.fill({
-    name: "John Doe",
-    email: "john@example.com",
-    phone: "+1234567890",
+  name: { value: "John Doe" },
+  email: { value: "john@example.com", verified: false },
 }).createEntity();
-
 await user.save();
 ```
 
-### Update Entity Components
+`updateEntity` patches the same shape and does not save:
 
 ```typescript
 const user = await Entity.FindById(userId);
 if (!user) throw new Error("User not found");
 
-// Get current values
-const currentProfile = await user.get(ProfileComponent);
+await UserArcheType.updateEntity(user, {
+  name: { value: "Jane Doe" },
+});
+await user.save();
+```
 
-// Update with merged values
-await user.set(ProfileComponent, {
-    ...currentProfile,
+### `get()` is a snapshot
+
+```typescript
+const current = await user.get(ProfileComponent);
+if (!current) {
+  user.add(ProfileComponent, { bio: "Updated bio" });
+} else {
+  await user.set(ProfileComponent, {
+    ...current,
     bio: "Updated bio",
-    updatedAt: new Date(),
-});
-
+  });
+}
 await user.save();
 ```
 
-#### Entity Method Signatures
+`get()` returns `null` when the component is absent: empty entity id, a pending or saved removal, a negative-cache tombstone, or zero rows. That is not an error.
 
-The `get()` and `set()` methods accept an optional context parameter for transactions and DataLoader integration:
+`get()` throws `ComponentLoadError` (`bunsane/core/Entity`) on a pool, SQL, timeout, or admission failure (0.7+). `getOrThrow()` throws `ComponentMissingError` only after `get()` returned `null`.
 
-```typescript
-// Method signatures
-entity.get<T>(Component, context?: { loaders?: DataLoaders; trx?: Transaction }): Promise<T | null>
-entity.set<T>(Component, data, context?: { loaders?: DataLoaders; trx?: Transaction }): Promise<this>
-```
+Mutating the object `get()` returned does nothing. `has()` looks at memory only. `hasPersisted(Ctor)` checks the database and returns `false` if this session already removed the component (0.7+).
 
-See the [Transaction Patterns](#transaction-patterns) section for usage with transactions.
-
-### Update Using Archetype
+`remove()` of a component you have not loaded returns `true`. `save()` deletes the row (0.7+). `false` means this session already saved that deletion.
 
 ```typescript
-const user = await Entity.FindById(userId);
-if (!user) throw new Error("User not found");
-
-const updated = await UserArcheType.updateEntity(user, {
-    name: "Jane Doe",
-});
-
-await updated.save();
-```
-
-### Add Component to Existing Entity
-
-```typescript
-const user = await Entity.FindById(userId);
-if (!user) throw new Error("User not found");
-
-// Add new component
 user.add(PremiumTag, {});
-user.add(SubscriptionComponent, {
-    plan: "premium",
-    startDate: new Date(),
-    endDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-});
+await user.save();
 
+user.remove(PremiumTag);
 await user.save();
 ```
 
-### Check if Entity Has Component
+`FindById` returns `null` for a blank or unknown id. Pass `trx` when you are inside a transaction: `Entity.FindById(id, trx)` and `user.get(Ctor, { trx })`.
+
+Dirty flags change only after the transaction commits, including QSP and read-model sync. A rolled-back `save()` is not persisted. Retry it.
+
+## Transactions
+
+The default `db` export is a lazy proxy. `db.transaction` runs, but it does not take an admission permit. Use `dbTransaction` so the write shares the request lane.
 
 ```typescript
-const user = await Entity.FindById(userId);
-if (!user) throw new Error("User not found");
+import { Entity } from "bunsane";
+import { dbTransaction } from "bunsane/database/gateway";
 
-const premiumTag = await user.get(PremiumTag);
-const isPremium = premiumTag !== null;
-```
+const id = await dbTransaction(async (trx) => {
+  const source = await Entity.FindById(sourceId, trx);
+  if (!source) throw new Error("Source not found");
 
-## Transaction Patterns
+  const sourceBalance = await source.get(BalanceComponent, { trx });
+  if (!sourceBalance || sourceBalance.amount < amount) {
+    throw new Error("Insufficient funds");
+  }
 
-### Basic Transaction
+  await source.set(BalanceComponent, { amount: sourceBalance.amount - amount }, { trx });
+  await source.save(trx);
 
-```typescript
-import db from "bunsane/database";
+  const dest = await Entity.FindById(destId, trx);
+  if (!dest) throw new Error("Destination not found");
+  const destBalance = await dest.get(BalanceComponent, { trx });
+  await dest.set(
+    BalanceComponent,
+    { amount: (destBalance?.amount ?? 0) + amount },
+    { trx },
+  );
+  await dest.save(trx);
 
-await db.transaction(async (trx) => {
-    const user = await Entity.FindById(userId, trx);
-    if (!user) throw new Error("User not found");
-
-    await user.set(BalanceComponent, { amount: 100 }, { trx });
-    await user.save(trx);
+  const record = Entity.Create().add(TransferComponent, {
+    sourceId,
+    destId,
+    amount,
+    timestamp: new Date(),
+  });
+  await record.save(trx);
+  return record.id;
 });
 ```
 
-### Transaction with Multiple Entities
+A caller-supplied `trx` stays on that handle and takes no extra permit. If any call throws, the transaction rolls back. Use `getDb()` from `bunsane/database` only when you need the SQL instance itself. `db === getDb()` is false.
+
+Several independent inserts in one request: `Entity.saveMany(entities)` — one admission, one transaction, 500-row chunks (0.7+).
+
+## Queries
+
+Always `.take()`. An unbounded `exec()` that fills the default cap (10000) throws in development.
 
 ```typescript
-const result = await db.transaction(async (trx) => {
-    // Debit source account
-    const source = await Entity.FindById(sourceId, trx);
-    const sourceBalance = await source.get(BalanceComponent, { trx });
+import { Entity, FilterOp, Query } from "bunsane";
 
-    if (sourceBalance.amount < amount) {
-        throw new Error("Insufficient funds");
-    }
-
-    await source.set(BalanceComponent, {
-        amount: sourceBalance.amount - amount,
-    }, { trx });
-    await source.save(trx);
-
-    // Credit destination account
-    const dest = await Entity.FindById(destId, trx);
-    const destBalance = await dest.get(BalanceComponent, { trx });
-
-    await dest.set(BalanceComponent, {
-        amount: destBalance.amount + amount,
-    }, { trx });
-    await dest.save(trx);
-
-    // Create transaction record
-    const txRecord = Entity.Create()
-        .add(TransactionTag, {})
-        .add(TransactionInfoComponent, {
-            sourceId,
-            destId,
-            amount,
-            timestamp: new Date(),
-        });
-    await txRecord.save(trx);
-
-    return txRecord.id;
-});
-```
-
-### Transaction with Rollback on Error
-
-```typescript
-try {
-    await db.transaction(async (trx) => {
-        // Operations that might fail
-        await riskyOperation1(trx);
-        await riskyOperation2(trx);
-
-        // If any operation throws, entire transaction rolls back
-    });
-} catch (error) {
-    // Transaction automatically rolled back
-    console.error("Transaction failed:", error);
-    throw error;
-}
-```
-
-## Query Patterns
-
-### Find Single by Unique Field
-
-```typescript
 async function findUserByEmail(email: string): Promise<Entity | null> {
-    const results = await new Query()
-        .with(UserTag)
-        .with(
-            EmailComponent,
-            Query.filters(Query.filter("value", Query.filterOp.EQ, email))
-        )
-        .take(1)
-        .exec();
-
-    return results[0] || null;
+  const results = await new Query()
+    .with(UserTag)
+    .with(EmailComponent, Query.filters(Query.filter("value", FilterOp.EQ, email)))
+    .take(1)
+    .exec();
+  return results[0] ?? null;
 }
 ```
 
-### Find with Multiple Conditions
+Index `value`. A unique lookup without a key index is still a scan.
+
+### Load-more, including backward
 
 ```typescript
-async function findActiveUsersByRole(role: string) {
-    return await new Query()
-        .with(UserTag)
-        .with(
-            RoleComponent,
-            Query.filters(Query.filter("value", Query.filterOp.EQ, role))
-        )
-        .without(SoftDeletedTag)
-        .without(SuspendedTag)
-        .exec();
+async function pageByCreatedAt(pageSize: number, token?: string, before = false) {
+  let q = new Query()
+    .with(OrderInfoComponent)
+    .sortBy(OrderInfoComponent, "createdAt", "DESC")
+    .take(pageSize);
+  if (token) q = q.sortedCursor(token, before ? "before" : "after");
+
+  const items = await q.exec();
+  const { hasNextPage } = q.getLastRouteInfo();
+  const last = items[items.length - 1];
+  const row = last ? await last.get(OrderInfoComponent) : null;
+  return {
+    items,
+    hasNextPage: hasNextPage ?? false,
+    nextCursor: last
+      ? Query.encodeSortedCursor(row?.createdAt ?? null, last.id)
+      : undefined,
+  };
 }
 ```
 
-### Paginated list (prefer hasNextPage)
-
-Exact `.count()` on every page is often the slowest part of a list endpoint. Prefer `hasNextPage` for load-more UIs.
+`.cursor(id)` throws when a sort is set. Multi-key tokens must list every key, in sort order:
 
 ```typescript
-async function listPage(
-    build: () => Query,
-    pageSize: number,
-    sortedCursorToken?: string
-): Promise<{ items: Entity[]; hasNextPage: boolean; nextCursor?: string }> {
-    let q = build().take(pageSize);
-    if (sortedCursorToken) q = q.sortedCursor(sortedCursorToken);
-
-    const items = await q.exec();
-    const { hasNextPage } = q.getLastRouteInfo();
-    return { items, hasNextPage: hasNextPage ?? false };
-}
-
-// When the UI truly needs total pages (expensive — cache if possible):
-async function paginatedWithTotal(build: () => Query, page: number, pageSize: number) {
-    const [items, total] = await Promise.all([
-        build().take(pageSize).offset(page * pageSize).exec(),
-        build().count(),
-    ]);
-    return { items, total, pages: Math.ceil(total / pageSize) };
-}
+const token = Query.encodeSortedCursor(
+  [row?.status ?? null, row?.total ?? null],
+  entity.id,
+);
 ```
 
-See [List queries](../query-lists.md).
-```
-
-### Date Range Query
+A date range on an indexed field:
 
 ```typescript
-async function findOrdersInDateRange(startDate: Date, endDate: Date) {
-    return await new Query()
-        .with(OrderTag)
-        .with(
-            OrderInfoComponent,
-            Query.filters(
-                Query.filter("createdAt", Query.filterOp.GTE, startDate),
-                Query.filter("createdAt", Query.filterOp.LTE, endDate)
-            )
-        )
-        .sortBy(OrderInfoComponent, "createdAt", "DESC")
-        .exec();
-}
+await new Query()
+  .with(OrderInfoComponent, {
+    filters: [
+      Query.filter("createdAt", FilterOp.GTE, startDate),
+      Query.filter("createdAt", FilterOp.LTE, endDate),
+    ],
+  })
+  .sortBy(OrderInfoComponent, "createdAt", "DESC")
+  .take(100)
+  .exec();
 ```
 
-### Search Query with Optional Filters
+`sortByCreatedAt().with(X)` is not the same plan. If X is clustered in time, that list falls back to the previous plan plus about 10%. Use [QSP](../qsp.md), or sort on an indexed component field. See [Query optimization](./query-optimization.md).
+
+Open rows — do not load them and filter in JavaScript:
 
 ```typescript
-interface SearchFilters {
-    name?: string;
-    email?: string;
-    status?: string;
-    minPrice?: number;
-    maxPrice?: number;
-}
-
-async function searchProducts(filters: SearchFilters) {
-    let query = new Query().with(ProductTag);
-
-    if (filters.name) {
-        query = query.with(
-            ProductNameComponent,
-            Query.filters(
-                Query.filter("value", Query.filterOp.LIKE, `%${filters.name}%`)
-            )
-        );
-    }
-
-    if (filters.status) {
-        query = query.with(
-            ProductStatusComponent,
-            Query.filters(
-                Query.filter("value", Query.filterOp.EQ, filters.status)
-            )
-        );
-    }
-
-    if (filters.minPrice !== undefined || filters.maxPrice !== undefined) {
-        const priceFilters = [];
-        if (filters.minPrice !== undefined) {
-            priceFilters.push(
-                Query.filter("amount", Query.filterOp.GTE, filters.minPrice)
-            );
-        }
-        if (filters.maxPrice !== undefined) {
-            priceFilters.push(
-                Query.filter("amount", Query.filterOp.LTE, filters.maxPrice)
-            );
-        }
-        query = query.with(PriceComponent, Query.filters(...priceFilters));
-    }
-
-    return await query.take(100).exec();
-}
+await new Query()
+  .with(AssignmentComponent, {
+    filters: [Query.filter("completedAt", FilterOp.IS_NULL, null)],
+  })
+  .take(100)
+  .exec();
 ```
 
-## Archetype Patterns
-
-### Basic Archetype Definition
+## Archetypes and relations
 
 ```typescript
 import {
-    ArcheType,
-    ArcheTypeField,
-    BaseArcheType,
-    type ArcheTypeOwnProperties,
-} from "bunsane/core/ArcheType";
+  ArcheType,
+  ArcheTypeField,
+  ArcheTypeFunction,
+  BaseArcheType,
+  BelongsTo,
+  Entity,
+  HasMany,
+  HasOne,
+} from "bunsane";
+import type { ArcheTypeOwnProperties } from "bunsane/core/ArcheType";
 
 @ArcheType("User")
 export class UserArcheTypeClass extends BaseArcheType {
-    @ArcheTypeField(NameComponent)
-    name!: NameComponent;
+  @ArcheTypeField(NameComponent)
+  name!: NameComponent;
 
-    @ArcheTypeField(EmailComponent)
-    email!: EmailComponent;
+  @ArcheTypeField(EmailComponent)
+  email!: EmailComponent;
 
-    @ArcheTypeField(ProfileComponent, { nullable: true })
-    profile!: ProfileComponent;
+  @ArcheTypeField(ProfileComponent, { nullable: true })
+  profile!: ProfileComponent;
+
+  @HasMany(() => OrderArcheTypeClass, { foreignKey: "info.user_id" })
+  orders!: IOrderArcheType[];
+
+  @HasOne(() => DriverArcheTypeClass, { foreignKey: "profile.user_id", nullable: true })
+  driver?: IDriverArcheType;
+
+  @ArcheTypeFunction({ returnType: "string" })
+  async displayName(entity: Entity) {
+    const name = await entity.get(NameComponent);
+    const profile = await entity.get(ProfileComponent);
+    return profile?.nickname || name?.value || "Anonymous";
+  }
 }
 
 export type IUserArcheType = ArcheTypeOwnProperties<UserArcheTypeClass>;
 export const UserArcheType = new UserArcheTypeClass();
 ```
 
-### Archetype with Computed Fields
+`ArcheTypeOwnProperties` is not on the root barrel.
+
+Relation rules (0.8+):
+
+- Target is a class, `() => Class`, or a registered name. Unregistered targets fail schema build.
+- Omit `foreignKey` only if exactly one `user_id` or `parent_id` matches. Otherwise set `foreignKey: "component.prop"` — the archetype field on the owning side, then the property.
+- `hasMany` / `hasOne` / `belongsToMany` look at the related archetype. `belongsTo` looks at this archetype.
+- `@HasOne` is nullable unless `nullable: false`. A missing child is `null`, not an error.
+
+### Batch a computed field (0.8+)
 
 ```typescript
-import { ArcheTypeFunction } from "bunsane/core/ArcheType";
-import { Entity } from "bunsane/core/Entity";
+@ArcheTypeFunction({ returnType: "number", batch: true })
+async openOrderCounts(parents: readonly Entity[]) {
+  const ids = parents.map((parent) => parent.id);
+  const rows = await new Query()
+    .with(OrderInfoComponent, {
+      filters: [Query.filter("userId", FilterOp.IN, ids)],
+    })
+    .groupBy(OrderInfoComponent, "userId")
+    .countBy();
 
-@ArcheType("User")
-export class UserArcheTypeClass extends BaseArcheType {
-    @ArcheTypeField(NameComponent)
-    name!: NameComponent;
-
-    @ArcheTypeField(ProfileComponent, { nullable: true })
-    profile!: ProfileComponent;
-
-    @ArcheTypeFunction({ returnType: "String" })
-    async displayName(entity: Entity) {
-        const name = await entity.get(NameComponent);
-        const profile = await entity.get(ProfileComponent);
-
-        if (profile?.nickname) {
-            return profile.nickname;
-        }
-        return name?.value || "Anonymous";
-    }
-
-    @ArcheTypeFunction({ returnType: "Boolean" })
-    async isComplete(entity: Entity) {
-        const name = await entity.get(NameComponent);
-        const email = await entity.get(EmailComponent);
-        const profile = await entity.get(ProfileComponent);
-
-        return !!(name?.value && email?.value && profile?.bio);
-    }
+  const counts = new Map(parents.map((parent) => [parent.id, 0]));
+  for (const row of rows) counts.set(String(row.userId), Number(row.count));
+  return counts;
 }
 ```
 
-### Archetype with Relations
+One call per request, per distinct args. The `Map` is keyed by entity id. A missing key on a non-null field fails that parent.
+
+## GraphQL inputs
 
 ```typescript
-import { HasOne, HasMany, BelongsTo } from "bunsane/core/ArcheType";
+import { GraphQLOperation, t, type InferInput } from "bunsane";
 
-@ArcheType("User")
-export class UserArcheTypeClass extends BaseArcheType {
-    @ArcheTypeField(NameComponent)
-    name!: NameComponent;
+const createUserInput = {
+  name: t.string().minLength(2).maxLength(100).required(),
+  email: t.string().email().required(),
+  role: t.enum(["admin", "user"], "UserRole").required(),
+};
 
-    @HasOne("Driver", { foreignKey: "user_id", nullable: true })
-    driver?: IDriverArcheType;
-
-    @HasMany("Order", { foreignKey: "user_id", nullable: true })
-    orders!: IOrderArcheType[];
-}
-
-@ArcheType("Order")
-export class OrderArcheTypeClass extends BaseArcheType {
-    @ArcheTypeField(OrderInfoComponent)
-    info!: OrderInfoComponent;
-
-    @BelongsTo("User", { foreignKey: "info.user_id" })
-    user!: IUserArcheType;
-}
-```
-
-## Validation Patterns
-
-### GraphQL Input Schema
-
-> **Important:** The GraphQL schema generator can only infer **simple Zod types**. Complex validation chains (`.min()`, `.max()`, `.email()`, `.regex()`, `.transform()`) are NOT supported.
-
-**Correct approach:** Use simple scalar types in the input schema, then validate manually inside the resolver.
-
-```typescript
-// ✅ CORRECT: Simple scalars in input schema
 @GraphQLOperation({
-    type: "Mutation",
-    input: z.object({
-        name: z.string(),
-        email: z.string(),
-        phone: z.string().optional(),
-    }),
-    output: UserArcheType,
+  type: "Mutation",
+  input: createUserInput,
+  output: "User",
 })
-async createUser(args: { name: string; email: string; phone?: string }, context: GraphQLContext) {
-    // Validate inside resolver
-    if (args.name.length < 2 || args.name.length > 100) {
-        return new GraphQLError("Name must be between 2-100 characters", {
-            extensions: { code: "BAD_USER_INPUT" }
-        });
-    }
-
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(args.email)) {
-        return new GraphQLError("Invalid email format", {
-            extensions: { code: "BAD_USER_INPUT" }
-        });
-    }
-
-    // Proceed with validated data
-    const user = Entity.Create()
-        .add(UserTag, {})
-        .add(NameComponent, { value: args.name })
-        .add(EmailComponent, { value: args.email });
-    await user.save();
-    return user;
-}
-
-// ❌ WRONG: Complex validation in input schema (won't be inferred)
-@GraphQLOperation({
-    type: "Mutation",
-    input: z.object({
-        name: z.string().min(2).max(100),  // ❌ Not supported
-        email: z.string().email(),          // ❌ Not supported
-    }),
-    output: UserArcheType,
-})
-```
-
-### Using ArcheType for Complex Inputs
-
-For complex inputs based on archetypes, use `getInputSchema()` or `withValidation()`:
-
-```typescript
-// ✅ CORRECT: ArcheType handles schema generation properly
-@GraphQLOperation({
-    type: "Mutation",
-    input: UserArcheType.getInputSchema(),
-    output: UserArcheType,
-})
-async createUser(args: IUserArcheType, context: GraphQLContext) {
-    const user = UserArcheType.fill(args).createEntity();
-    await user.save();
-    return user;
-}
-
-// ✅ CORRECT: ArcheType with custom field validation
-@GraphQLOperation({
-    type: "Mutation",
-    input: UserArcheType.withValidation({
-        "info.role": z.enum([...Object.keys(UserRole)] as [string, ...string[]]),
-    }),
-    output: UserArcheType,
-})
-```
-
-### Enum Definition and Usage
-
-Define enums using the `@Enum()` decorator:
-
-```typescript
-import { Enum } from "bunsane/core/metadata";
-
-@Enum()
-export class OrderStatus {
-    static PENDING = "pending";
-    static PROCESSING = "processing";
-    static SHIPPED = "shipped";
-    static DELIVERED = "delivered";
-    static CANCELLED = "cancelled";
+async createUser(input: InferInput<typeof createUserInput>): Promise<unknown> | unknown {
+  const user = Entity.Create()
+    .add(UserTag, {})
+    .add(NameComponent, { value: input.name })
+    .add(EmailComponent, { value: input.email, verified: false });
+  await user.save();
+  return user;
 }
 ```
 
-Use enums in Zod validation with `Object.keys()`:
+Zod and string-map inputs still execute and log a deprecation warning. New code uses the record above. Nested objects use `t.object(shape, name)` as a field, not as the top-level `input`.
+
+`@Enum()` classes (`bunsane/core/metadata`) still register enum metadata for archetype fields. For an operation argument, `t.enum` is the input.
+
+## Soft delete
 
 ```typescript
-@GraphQLOperation({
-    type: "Mutation",
-    input: z.object({
-        orderId: z.string(),
-        status: z.enum([...Object.keys(OrderStatus)] as [string, ...string[]]),
-    }),
-    output: OrderArcheType,
-})
-async updateOrderStatus(args: { orderId: string; status: string }, context: GraphQLContext) {
-    // args.status will be one of: "PENDING", "PROCESSING", "SHIPPED", etc.
-}
-```
+import { Component, CompData, BaseComponent, Entity, Query } from "bunsane";
 
-### ArcheType with Custom Field Validation
-
-Use `ArcheType.withValidation()` to add custom validators to archetype fields:
-
-```typescript
-@GraphQLOperation({
-    type: "Mutation",
-    input: OrderArcheType.withValidation({
-        "info.status": z.enum([...Object.keys(OrderStatus)] as [string, ...string[]]),
-        "info.quantity": z.number().min(1, "Quantity must be at least 1"),
-    }),
-    output: OrderArcheType,
-})
-async createOrder(args: IOrderArcheType, context: GraphQLContext) {
-    const order = OrderArcheType.fill(args).createEntity();
-    await order.save();
-    return order;
-}
-```
-
-## Soft Delete Pattern
-
-### Components
-
-```typescript
 @Component
 export class SoftDeletedTag extends BaseComponent {}
 
 @Component
 export class DeletedAtComponent extends BaseComponent {
-    @CompData({ indexed: true })
-    value: Date = new Date();
+  @CompData({ indexed: true })
+  value: Date = new Date();
 
-    @CompData()
-    deletedBy: string = "";
+  @CompData()
+  deletedBy: string = "";
 }
-```
 
-### Soft Delete Operation
-
-```typescript
 async function softDelete(entityId: string, deletedBy: string) {
-    const entity = await Entity.FindById(entityId);
-    if (!entity) throw new Error("Entity not found");
-
-    entity.add(SoftDeletedTag, {});
-    entity.add(DeletedAtComponent, {
-        value: new Date(),
-        deletedBy,
-    });
-
-    await entity.save();
+  const entity = await Entity.FindById(entityId);
+  if (!entity) throw new Error("Entity not found");
+  entity.add(SoftDeletedTag, {});
+  entity.add(DeletedAtComponent, { value: new Date(), deletedBy });
+  await entity.save();
 }
-```
 
-### Query Excluding Soft Deleted
-
-```typescript
 async function listActiveUsers() {
-    return await new Query()
-        .with(UserTag)
-        .without(SoftDeletedTag)  // Exclude soft deleted
-        .exec();
+  return new Query().with(UserTag).without(SoftDeletedTag).take(100).exec();
 }
-```
 
-### Restore Soft Deleted
-
-```typescript
 async function restore(entityId: string) {
-    const entity = await Entity.FindById(entityId);
-    if (!entity) throw new Error("Entity not found");
-
-    // Remove soft delete markers
-    await entity.remove(SoftDeletedTag);
-    await entity.remove(DeletedAtComponent);
-
-    await entity.save();
+  const entity = await Entity.FindById(entityId);
+  if (!entity) throw new Error("Entity not found");
+  entity.remove(SoftDeletedTag);
+  entity.remove(DeletedAtComponent);
+  await entity.save();
 }
 ```
 
-## Logging Pattern
+`.without(SoftDeletedTag)` does not route to QSP. A hot "active only" list should filter an indexed status field instead.
+
+`sortByCreatedAt()` / `sortByUpdatedAt()` combined with `.with()` or `.without()` already exclude soft-deleted entities (0.9, unreleased). A component-field sort does not. Exclude them yourself.
+
+## Logging
 
 ```typescript
-import { logger as MainLogger } from "bunsane/core/Logger";
+import { logger, GraphQLOperation, t, type InferInput } from "bunsane";
 
-class OrderService extends BaseService {
-    private logger = MainLogger.child({ service: "OrderService" });
+const log = logger.child({ service: "OrderService" });
 
-    @GraphQLOperation({
-        type: "Mutation",
-        input: CreateOrderInput,
-        output: OrderArcheType,
-    })
-    async createOrder(args: any, context: GraphQLContext) {
-        const userId = context.jwt?.payload?.user_id;
+const createOrderInput = {
+  sku: t.string().required(),
+  quantity: t.int().min(1).required(),
+};
 
-        this.logger.info({
-            msg: "Creating order",
-            userId,
-            itemCount: args.items?.length,
-        });
-
-        try {
-            const order = Entity.Create()
-                .add(OrderTag, {})
-                .add(OrderInfoComponent, args);
-
-            await order.save();
-
-            this.logger.info({
-                msg: "Order created",
-                orderId: order.id,
-                userId,
-            });
-
-            return order;
-        } catch (error) {
-            this.logger.error({
-                msg: "Failed to create order",
-                userId,
-                error: error instanceof Error ? error.message : "Unknown error",
-            });
-            throw error;
-        }
-    }
-}
-```
-
-## Batch Processing Pattern
-
-```typescript
-async function processBatch<T>(
-    items: T[],
-    batchSize: number,
-    processor: (batch: T[]) => Promise<void>
-) {
-    for (let i = 0; i < items.length; i += batchSize) {
-        const batch = items.slice(i, i + batchSize);
-        await processor(batch);
-    }
-}
-
-// Usage
-const allOrders = await new Query().with(PendingOrderTag).exec();
-
-await processBatch(allOrders, 100, async (batch) => {
-    await db.transaction(async (trx) => {
-        for (const order of batch) {
-            await processOrder(order, trx);
-        }
-    });
-});
-```
-
-## Rate Limiting Pattern
-
-```typescript
-const rateLimits = new Map<string, { count: number; resetAt: number }>();
-
-function checkRateLimit(key: string, limit: number, windowMs: number): boolean {
-    const now = Date.now();
-    const entry = rateLimits.get(key);
-
-    if (!entry || entry.resetAt < now) {
-        rateLimits.set(key, { count: 1, resetAt: now + windowMs });
-        return true;
-    }
-
-    if (entry.count >= limit) {
-        return false;
-    }
-
-    entry.count++;
-    return true;
-}
-
-// Usage in service
 @GraphQLOperation({
-    type: "Mutation",
-    input: z.object({ email: z.string().email() }),
-    output: "Boolean",
+  type: "Mutation",
+  input: createOrderInput,
+  output: "Order",
 })
-async sendVerificationEmail(args: { email: string }, context: GraphQLContext) {
-    const rateLimitKey = `email:${args.email}`;
-
-    if (!checkRateLimit(rateLimitKey, 3, 60000)) {  // 3 per minute
-        return new GraphQLError("Rate limit exceeded", {
-            extensions: { code: "RATE_LIMITED" }
-        });
-    }
-
-    // Send email
-    return true;
+async createOrder(input: InferInput<typeof createOrderInput>): Promise<unknown> | unknown {
+  log.info({ sku: input.sku, quantity: input.quantity }, "creating order");
+  const order = Entity.Create().add(OrderInfoComponent, {
+    sku: input.sku,
+    quantity: input.quantity,
+  });
+  await order.save();
+  log.info({ orderId: order.id }, "order created");
+  return order;
 }
 ```
+
+Pass the error as `error` or `err`. Pino serializes both. `{ error: String(error) }` drops the stack.
+
+## Batch work
+
+```typescript
+import { Entity } from "bunsane";
+
+const pending = await new Query().with(PendingOrderTag).take(1000).exec();
+await Entity.saveMany(pending);
+```
+
+Do not `exec()` the full table and loop `save()`. If the job is a `@ScheduledTask`, set `maxEntitiesPerExecution`. Without it the runner caps the query at 1000.
+
+## Rate limit
+
+Use `rateLimit` for one process. It keys by socket IP and keeps buckets in memory, so a second instance does not share them. Multi-instance limits need a shared store. A `Map` inside a resolver has the same gap and also ignores the socket IP.
+
+
+```typescript
+import { App, rateLimit } from "bunsane";
+
+const app = new App({ name: "MyAPI", version: "1.0.0" });
+app.use(rateLimit({ max: 100, windowMs: 60_000, pathPrefixes: ["/graphql"] }));
+```
+
+`trustProxy: true` is required before `X-Forwarded-For` is trusted. Register `use()` before `start()`.

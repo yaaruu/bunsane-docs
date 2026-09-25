@@ -22,20 +22,14 @@ Remote is appropriate when two or more BunSane apps need to coordinate and share
 ## Quickstart
 
 ```typescript
-import App from "bunsane/core/App";
-import { BaseService } from "bunsane/service";
+import { App, BaseService, ServiceRegistry } from "bunsane";
 import {
     RemoteEvent,
     RemoteRpc,
-    registerRemoteHandlers,
-    RemoteContext,
+    type RemoteContext,
 } from "bunsane/core/remote";
 
 class OrderService extends BaseService {
-    constructor(private app: App) {
-        super();
-        registerRemoteHandlers(this);
-    }
 
     @RemoteEvent({ event: "order.created" })
     async onOrderCreated(data: { orderId: string }, ctx: RemoteContext) {
@@ -50,8 +44,12 @@ class OrderService extends BaseService {
 
 const app = new App("orders");
 app.enableRemote();
+ServiceRegistry.registerService(new OrderService());
 await app.init();
 ```
+
+Do not call `registerRemoteHandlers` in the constructor. Remote is not started yet, so that call warns and skips. After `enableRemote()`, `init()` starts the manager and registers handlers on every service already in `ServiceRegistry`.
+
 
 From any other app:
 
@@ -90,12 +88,12 @@ await remote.emit(target, event, data);
 | `event` | `string` | Event name used for handler routing |
 | `data` | `unknown` | JSON-serializable payload |
 
-Returns the Redis message id on success. Throws `RemoteError` on failure:
+Returns the Redis message id on success. An open circuit throws `CircuitOpenError` (from `"bunsane/core/remote"`), not `RemoteError`. `call()` wraps that same condition as `RemoteError` with `code: "CIRCUIT_OPEN"`.
 
-| `code` | Cause |
+| Failure | Cause |
 |---|---|
-| `CIRCUIT_OPEN` | Circuit breaker rejected the publish (Redis persistently failing) |
-| *(raw ioredis error)* | Publisher connection down and breaker still closed |
+| `CircuitOpenError` (`code: "CIRCUIT_OPEN"`) | Circuit breaker rejected the publish |
+| raw Redis error | Publisher connection down and breaker still closed |
 
 ### At-Least-Once Delivery
 
@@ -113,12 +111,12 @@ Events are delivered via Redis consumer groups. If a handler fails, the message 
 
 ```typescript
 @RemoteRpc({ event: "order.get" })
-async getOrder(data: { id: string }, ctx: RemoteContext): Promise<Order> {
+async getOrder(data: { id: string }, ctx: RemoteContext) {
     const order = await Entity.FindById(data.id);
     if (!order) {
         throw new RemoteError("order not found", { code: "NOT_FOUND" });
     }
-    return order.toJSON();
+    return order.serialize();
 }
 ```
 
@@ -249,13 +247,7 @@ This is the same requirement as for direct `emit()` -- XAUTOCLAIM redelivery pro
 
 ### Retention
 
-Published rows are not deleted. The partial index `idx_remote_outbox_pending` keeps polling performance stable regardless of history size, but the table grows indefinitely. Add your own cleanup job if you need to trim it:
-
-```sql
-DELETE FROM remote_outbox
-WHERE published_at IS NOT NULL
-  AND published_at < NOW() - INTERVAL '7 days';
-```
+Published rows are deleted by the outbox worker, not kept forever. `maybeTrimPublished` runs at most once an hour and deletes up to 10000 rows whose `published_at` is older than `outboxRetentionMs` (default 24 hours, `86_400_000`). Set `outboxRetentionMs: 0` to disable trimming. The partial index `idx_remote_outbox_pending` keeps polling stable while unpublished rows remain.
 
 ### Schema
 
@@ -266,7 +258,9 @@ CREATE TABLE remote_outbox (
     event VARCHAR(255) NOT NULL,
     data JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    published_at TIMESTAMPTZ
+    published_at TIMESTAMPTZ,
+    claim_token TEXT,
+    claimed_at TIMESTAMPTZ
 );
 
 CREATE INDEX idx_remote_outbox_pending
@@ -274,7 +268,7 @@ ON remote_outbox (created_at)
 WHERE published_at IS NULL;
 ```
 
-No retry count, no DLQ column, no lease columns. Keep it minimal -- extend when there's a concrete reason.
+The worker also adds `claim_token` and `claimed_at` on older installs. There is no retry-count column and no DLQ column.
 
 ## Handler Context
 
@@ -323,14 +317,25 @@ await app.init();
 
 ## Environment Variables
 
-Redis connection is read from the same env vars as the cache layer:
+Redis connection uses the same variables as the cache client. `REDIS_TLS=true` opens TLS (0.8+). It is not a no-op. `REDIS_USERNAME` is sent when set. `REDIS_TLS_SERVERNAME` and `REDIS_TLS_REJECT_UNAUTHORIZED` configure the TLS socket. See [Configuration](./configuration.md).
 
 | Var | Default |
 |---|---|
 | `REDIS_HOST` | `localhost` |
 | `REDIS_PORT` | `6379` |
 | `REDIS_PASSWORD` | (none) |
+| `REDIS_USERNAME` | (none) |
 | `REDIS_DB` | `0` |
+| `REDIS_TLS` | unset (plaintext) |
+| `BUNSANE_RPC_SECRET` | unset |
+
+### Signing (0.8+)
+
+`BUNSANE_RPC_SECRET` unset: envelopes are unsigned, and startup logs one warning. Set: publishers attach an HMAC-SHA256 (`sig`). Consumers ACK-drop unsigned or tampered envelopes. Do not set the secret until every peer is on 0.8. Redis must still be authenticated and network-isolated. Signing is not a substitute for that.
+
+### `replyTo`
+
+An RPC response is written only when `replyTo` is `rpc:responses:<instanceId>`. The instance id is 1–128 characters of `A-Za-z0-9._-`. Any other target is ACK'd and dropped, so a request cannot redirect results into an arbitrary stream.
 
 Remote opens three Redis connections: a publisher (retries enabled), a blocking stream consumer, and a blocking RPC response listener. The blocking connections set `maxRetriesPerRequest: null` -- required by ioredis for XREAD/XREADGROUP with BLOCK, since the retry budget would cancel long-running commands.
 
@@ -404,7 +409,7 @@ The remote layer shuts down **after** the scheduler and **before** the cache and
 
 ### Health Check
 
-`GET /health/remote` returns a JSON health report. `200` when all checks pass, `503` when any degrade.
+`GET /health/remote` is deny-by-default (0.7+). It returns 404 unless `BUNSANE_METRICS_TOKEN` (at least 16 characters) is set, or `BUNSANE_METRICS=public`. Send `Authorization: Bearer` or `x-metrics-token`. When the gate is open, the body is a JSON health report: `200` when all checks pass, `503` when any degrade.
 
 ```json
 {
@@ -501,7 +506,7 @@ await ensureOutboxSchema(db);
 - **No built-in DLQ consumer.** The DLQ captures poison messages but nothing reprocesses them. Consume with any Redis client.
 - **No service discovery.** Broadcast `"*"` writes to a literal `remote:*` stream; nothing enumerates known apps.
 - **No typed event registry.** `event` is a free-form string. Callers and handlers agree by convention. A type-safe registry is deferred until there's a concrete use case.
-- **Outbox grows indefinitely.** Successful rows stay in `remote_outbox`. Add your own cleanup job (see Transactional Outbox → Retention).
+- **Outbox retention is 24 hours by default.** Published rows older than `outboxRetentionMs` are deleted (at most 10000 per hour). Set `outboxRetentionMs: 0` to keep them. See Transactional Outbox → Retention.
 
 ## Error Handling Pattern
 
@@ -524,18 +529,21 @@ For RPC, prefer specific error codes over generic throws:
 async getOrder(data: { id: string }) {
     const order = await Entity.FindById(data.id);
     if (!order) throw new RemoteError("not found", { code: "NOT_FOUND" });
-    if (!order.isPublic) throw new RemoteError("forbidden", { code: "FORBIDDEN" });
-    return order.toJSON();
+    const info = await order.get(OrderInfoComponent);
+    if (!info?.isPublic) throw new RemoteError("forbidden", { code: "FORBIDDEN" });
+    return order.serialize();
 }
 ```
 
 When Redis is flapping, `CIRCUIT_OPEN` is the signal to degrade gracefully:
 
 ```typescript
+import { CircuitOpenError } from "bunsane/core/remote";
+
 try {
     await remote.emit("notifications", "order.created", payload);
 } catch (err) {
-    if (err instanceof RemoteError && err.code === "CIRCUIT_OPEN") {
+    if (err instanceof CircuitOpenError) {
         // Breaker is open -- fall back to outbox so we don't lose the event.
         await db.transaction(async (trx) => {
             await remote.emit("notifications", "order.created", payload, { trx });

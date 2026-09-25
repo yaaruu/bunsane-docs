@@ -13,14 +13,14 @@ There are six hook event types, split into two categories.
 
 | Event | Class | Fires When |
 |---|---|---|
-| `entity.created` | `EntityCreatedEvent` | After the first `entity.save()` on a new entity |
-| `entity.updated` | `EntityUpdatedEvent` | After `entity.save()` when components changed |
-| `entity.deleted` | `EntityDeletedEvent` | After `entity.delete()` |
-| `component.added` | `ComponentAddedEvent` | Inside `entity.add(component)` |
-| `component.updated` | `ComponentUpdatedEvent` | Inside `entity.set(TypeID, data)` when data changes |
-| `component.removed` | `ComponentRemovedEvent` | Inside `entity.remove(TypeID)` |
+| `entity.created` | `EntityCreatedEvent` | After a new entity's `save()` commits, in a post-commit microtask |
+| `entity.updated` | `EntityUpdatedEvent` | After `save()` commits, when components changed, in that same microtask |
+| `entity.deleted` | `EntityDeletedEvent` | After `delete()` commits, in a post-commit microtask |
+| `component.added` | `ComponentAddedEvent` | After `entity.add()`, not awaited |
+| `component.updated` | `ComponentUpdatedEvent` | Inside `entity.set()`, and that call awaits the hook |
+| `component.removed` | `ComponentRemovedEvent` | After `entity.remove()`, not awaited |
 
-**Entity events** (`entity.*`) are awaited -- your app waits for them to complete before continuing. **Component events** (`component.*`) fire asynchronously as fire-and-forget side effects.
+`save()` and `delete()` return before entity hooks run. Sync and `async: true` only order hooks relative to each other inside that later pass. Do not use a hook for work that must finish before `save()` resolves. Shutdown still drains queued hook work. `set()` is the exception: it awaits `component.updated` before it returns. Hook errors are logged and do not fail the entity call.
 
 ## Event Properties
 
@@ -28,7 +28,7 @@ All events expose `timestamp`, `entity`, and `eventType`, plus getter methods fo
 
 | Event Class | Additional Properties |
 |---|---|
-| `EntityUpdatedEvent` | `changedComponents: string[]` -- type IDs of components that changed |
+| `EntityUpdatedEvent` | `changedComponents: string[]` -- SHA-256 type ids of components that changed, not class names |
 | `EntityDeletedEvent` | `isSoftDelete: boolean` |
 | `ComponentAddedEvent`, `ComponentUpdatedEvent`, `ComponentRemovedEvent` | `component`, `componentType` |
 | `ComponentUpdatedEvent` | `oldData`, `newData` |
@@ -37,7 +37,7 @@ All events expose `timestamp`, `entity`, and `eventType`, plus getter methods fo
 
 The decorator API is the primary way to register hooks inside services. Import from `bunsane/core/decorators/EntityHooks`.
 
-Services that extend `BaseService` have their decorated hooks auto-registered during app boot via `ComponentRegistry`. No manual registration is needed.
+Decorated hooks are registered during boot, when `ComponentRegistry` sets up component features, for services already in `ServiceRegistry`. Register the service before `init()`. A service added after that pass is not picked up unless you call `registerDecoratedHooks(service)` from `"bunsane/core/decorators/EntityHooks"`.
 
 ### @EntityHook
 
@@ -126,7 +126,7 @@ All four decorators accept an `options` object as their last argument.
 |---|---|---|---|
 | `priority` | `number` | `0` | Higher numbers execute first |
 | `name` | `string` | -- | Label for debugging and metrics |
-| `async` | `boolean` | `false` | `true` runs this hook in parallel with other async hooks |
+| `async` | `boolean` | `false` | When `true`, the hook is enqueued after the sync hooks in the same event and is not awaited by that pass. It does not make `save()` wait |
 | `filter` | `(event) => boolean` | -- | Predicate for conditional execution |
 | `timeout` | `number` | -- | Maximum execution time in ms before the hook is aborted |
 | `componentTarget` | `ComponentTargetConfig` | -- | Filter by entity component composition |
@@ -155,23 +155,22 @@ async onUnshippedOrderUpdated(event: EntityUpdatedEvent) {
 }
 ```
 
-## Execution Model
+Entity hooks do not run inside `save()`. After the transaction commits, a microtask runs cache invalidation, then the hooks. Inside that pass:
 
-Within a single event, hooks run in two passes:
+1. **Sync hooks** run in priority order (highest first) and are awaited by the microtask.
+2. **`async: true` hooks** are enqueued after the sync pass and are not awaited by it.
 
-1. **Sync hooks** (default) -- execute sequentially in priority order (highest first).
-2. **Async hooks** (`async: true`) -- execute in parallel via `Promise.allSettled()` after all sync hooks complete.
-
-Each hook is individually error-wrapped. A failing hook is logged and skipped; it does not interrupt the other hooks or the entity operation that triggered them.
+A failing hook is logged and skipped. It does not fail `save()`, `add()`, `set()`, or `remove()`.
 
 ```
-event fires
-  → sync hook (priority 10)
-  → sync hook (priority 0)
-  → async hook  ─┐
-  → async hook   ├── run in parallel
-  → async hook  ─┘
+save() commits
+  → save() resolves
+  → microtask: cache invalidation
+  → sync hooks (priority order)
+  → async hooks queued; shutdown drains any still in flight
 ```
+
+`set()` is different: it awaits `component.updated` before returning. `add()` and `remove()` schedule their component hooks and return immediately.
 
 ## Error Handling
 
@@ -239,20 +238,18 @@ EntityHookManager.resetMetrics("entity.updated");
 A realistic service that combines an audit hook, a cache invalidation hook, and a component-targeted notification hook.
 
 ```typescript
-import { BaseService } from "bunsane/service";
+import { BaseService, CacheManager, logger as MainLogger } from "bunsane";
 import {
-    EntityHook,
     ComponentHook,
     ComponentTargetHook,
+    EntityHook,
 } from "bunsane/core/decorators/EntityHooks";
 import type {
-    EntityCreatedEvent,
-    EntityUpdatedEvent,
-    EntityDeletedEvent,
     ComponentUpdatedEvent,
+    EntityCreatedEvent,
+    EntityDeletedEvent,
+    EntityUpdatedEvent,
 } from "bunsane/core/events/EntityLifecycleEvents";
-import { logger as MainLogger } from "bunsane/core/Logger";
-import { CacheManager } from "bunsane/core/cache";
 
 const logger = MainLogger.child({ service: "OrderSideEffects" });
 
@@ -287,12 +284,14 @@ class OrderSideEffectsService extends BaseService {
         });
     }
 
-    // --- Cache invalidation (async, runs in parallel with other async hooks) ---
-
+    // Runs after save() has already returned.
     @EntityHook("entity.updated", {
         name: "order-cache-invalidate",
         async: true,
-        filter: (event) => (event as EntityUpdatedEvent).changedComponents.includes("OrderStatus"),
+        filter: (event) =>
+            (event as EntityUpdatedEvent).changedComponents.includes(
+                new OrderStatusComponent().getTypeID(),
+            ),
     })
     async onOrderStatusChangedInvalidateCache(event: EntityUpdatedEvent) {
         const cache = CacheManager.getInstance();
@@ -328,7 +327,7 @@ class OrderSideEffectsService extends BaseService {
 
     @ComponentHook("component.updated", {
         name: "order-status-log",
-        filter: (event) => event.componentType === OrderStatusComponent.TYPE_ID,
+        filter: (event) => event.componentType === new OrderStatusComponent().getTypeID(),
     })
     onOrderStatusComponentChanged(event: ComponentUpdatedEvent) {
         logger.info(
@@ -344,7 +343,7 @@ export default OrderSideEffectsService;
 Register it alongside your other services:
 
 ```typescript
-import { ServiceRegistry } from "bunsane/service";
+import { App, ServiceRegistry } from "bunsane";
 import OrderSideEffectsService from "./services/OrderSideEffectsService";
 
 export default class MyAPI extends App {
@@ -357,4 +356,4 @@ export default class MyAPI extends App {
 }
 ```
 
-No additional wiring is needed -- the decorators are picked up automatically when the service is registered.
+Register the service before `init()`. Boot registers decorated hooks for the services present then. A later `registerService` does not attach hooks unless you call `registerDecoratedHooks(service)`.

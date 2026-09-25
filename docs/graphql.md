@@ -4,56 +4,94 @@ sidebar_position: 5
 
 # GraphQL
 
-BunSane auto-generates a GraphQL API from your services and archetypes. You do not write schema files by hand -- the schema is built from your TypeScript code.
+BunSane builds the GraphQL schema from your services and archetypes. You do not write SDL files. Schema build fails on a bad output, an unregistered relation, or an `@ArcheTypeFunction` with no usable return type. It does not silently emit `String` or `[Any]` (0.7+).
 
-## GraphQL Playground
+## Playground
 
-When your app is running, visit the built-in GraphQL playground:
+With the server running and GraphiQL enabled:
 
 ```
 http://localhost:3000/graphql
 ```
 
-This interactive editor lets you explore your schema, write queries, and test mutations.
+Introspection and GraphiQL resolve in this order:
+
+1. `app.setGraphQLIntrospection(boolean)` / `app.setGraphQLGraphiQL(boolean)`, if you called them
+2. else `GRAPHQL_INTROSPECTION` / `GRAPHQL_GRAPHIQL` (`on` or `off`)
+3. else **on only when `NODE_ENV=development`**
+
+`NODE_ENV=test`, `production`, and unset all leave both off. With GraphiQL off, a `GET /graphql` that wants HTML returns 404. POST still works.
 
 ## How Operations Are Created
 
-GraphQL operations are defined using the `@GraphQLOperation` decorator on service methods. You explicitly specify whether each method is a query or a mutation:
+Decorate a service method with `@GraphQLOperation`. The method name is the field name unless you set `name`.
 
 ```typescript
-import { GraphQLOperation } from "bunsane/gql";
-import type { GraphQLContext } from "bunsane/types/graphql.types";
+import { BaseService, Entity, GraphQLOperation, t } from "bunsane";
 
 class UserService extends BaseService {
-    // This becomes a GraphQL query named "profile"
     @GraphQLOperation({
         type: "Query",
+        input: { id: t.id().required() },
         output: UserArcheType,
     })
-    async profile(args: {}, context: GraphQLContext) {
-        const userId = context.jwt.payload.user_id;
-        return await Entity.FindById(userId);
+    async profile(input: { id: string }) {
+        return await Entity.FindById(input.id);
     }
 
-    // This becomes a GraphQL mutation named "updateProfile"
     @GraphQLOperation({
         type: "Mutation",
-        input: z.object({ name: z.string() }),
+        input: { name: t.string().required() },
         output: UserArcheType,
     })
-    async updateProfile(args: { name: string }, context: GraphQLContext) {
+    async updateProfile(input: { name: string }) {
         // ...
     }
 }
 ```
 
-The method name becomes the operation name in your GraphQL schema. Set `type: "Query"` for read operations and `type: "Mutation"` for write operations.
+`type` is `"Query"` or `"Mutation"`. With a `t.*` input, the method is checked as `(input, ctx?, info?) => output`.
+
+Clients pass one argument named `input`:
+
+```graphql
+mutation {
+    updateProfile(input: { name: "Ada" }) {
+        id
+    }
+}
+```
+
+The resolver receives the unwrapped object (`{ name: "Ada" }`), not `{ input: ... }`.
+
+### Output kinds
+
+`output` must be one of:
+
+| Value | Generated field type |
+|---|---|
+| Archetype instance or class | that archetype's GraphQL type |
+| `[Archetype]` | a list of that type |
+| `"Boolean"`, `"String"`, `"Int"`, or any other type-name string | that name, verbatim |
+| `{ id: "ID!", name: "String" }` | a generated object type |
+
+An empty string, an empty array, a Zod schema, or any other value throws at schema build:
+
+```text
+Operation "createTodo" has an unrecognised output type (...). Refusing to default to String.
+```
+
+### Inputs
+
+Prefer `t.*`. Zod object inputs and string maps (`{ id: "ID!" }`) still work and log a deprecation warning. Removal is planned before 1.0, not in 0.8 or 0.9.
+
+`t.*` constraints (`.minLength()`, `.email()`, `.min()`) run at request time. They are not written into the SDL. Names passed to `t.object`, `t.enum`, and `t.ref` must be GraphQL identifiers or construction throws (0.8+).
+
+There is no `t.date()`.
 
 ## How Archetypes Become Types
 
-When you define an archetype with `@ArcheType("User")`, BunSane generates a corresponding GraphQL type. Each `@ArcheTypeField` becomes a field on that type, and `@ArcheTypeFunction` methods become computed fields.
-
-For example, this archetype:
+`@ArcheType("User")` becomes an output type `User`. It does not create `UserInput`. GraphQL input types come from `@GraphQLOperation` and are named `${operationName}Input`. Nested component types lower-case the first character of the class name (`NameComponent` → `nameComponent`). A component with no `@CompData` fields is omitted.
 
 ```typescript
 @ArcheType("User")
@@ -66,122 +104,98 @@ export class UserArcheTypeClass extends BaseArcheType {
 }
 ```
 
-Generates this GraphQL type:
-
 ```graphql
 type User {
-    name: NameComponent!
-    email: EmailComponent
-}
-
-input UserInput {
-    name: NameComponentInput!
-    email: EmailComponentInput
+    id: ID
+    name: nameComponent!
+    email: emailComponent
 }
 ```
 
-## How Zod Becomes Input Types
+`@ArcheTypeFunction` methods are computed fields on that output type. Relations are fields too. Neither is part of `getInputSchema()`, which is a Zod object for in-process checks, not an SDL input.
 
-When you pass a Zod schema as the `input` option to `@GraphQLOperation`, BunSane converts it to a GraphQL input type:
+You do not call `registerFieldResolvers`. Schema build attaches field, relation, and function resolvers and skips pairs that are already registered (0.7+).
+
+### Date scalar
+
+SDL says `Date` only when the Zod or `@CompData` type is `Date`. A field named `createdAt` or `dateOfBirth` with type `string` stays `String`. The old name heuristic is gone (0.7+).
+
+### `id: ID`
+
+`ID` is used for the archetype's own `id` field, and for `t.id()`. A component property `id: string` is `String`, not `ID`.
+
+## Depth and complexity
+
+Defaults (0.7+):
+
+| Limit | Default | Floor |
+|---|---|---|
+| Max depth | 15 | 15. `setGraphQLMaxDepth(n)` throws if `n` is not an integer ≥ 15. `0` does not disable it |
+| Max complexity | 1000 | 1. `0` does not disable it |
 
 ```typescript
-@GraphQLOperation({
-    type: "Mutation",
-    input: z.object({
-        title: z.string(),
-        completed: z.boolean(),
-    }),
-    output: TodoArcheType,
-})
-async createTodo(args: { title: string; completed: boolean }, context: GraphQLContext) {
-    // ...
-}
+app.setGraphQLMaxDepth(20);
+app.setGraphQLMaxComplexity(2000);
 ```
 
-This generates a GraphQL input type with `title: String!` and `completed: Boolean!`.
-
-:::caution Simple Types Only
-
-Only basic Zod types work for GraphQL schema generation: `z.string()`, `z.number()`, `z.boolean()`, `z.enum()`, and `z.object()`. Validation chains like `.min()`, `.max()`, or `.email()` are **not** reflected in the GraphQL schema. If you need complex validation, do it inside your resolver method.
-
-:::
-
-## GraphQL Context
-
-Every operation receives a `context` parameter with request information:
-
-```typescript
-async myOperation(args: {}, context: GraphQLContext) {
-    // JWT payload (when using the JWT plugin)
-    const userId = context.jwt?.payload?.user_id;
-
-    // DataLoaders for efficient batching
-    const entity = await context.loaders.entity.load(someId);
-}
-```
-
-## Adding Yoga Plugins
-
-BunSane uses [GraphQL Yoga](https://the-guild.dev/graphql/yoga-server) under the hood. You can add any Yoga plugin:
-
-```typescript
-import { useJWT } from "@graphql-yoga/plugin-jwt";
-
-export default class MyAPI extends App {
-    constructor() {
-        super("MyAPI", "1.0.0");
-
-        this.addYogaPlugin(useJWT({
-            // JWT configuration...
-        }));
-    }
-}
-```
-
-See the [JWT Authentication Setup](/docs/examples#jwt-authentication-setup) example for a complete JWT configuration.
+The same floors apply to `GRAPHQL_MAX_DEPTH` and `GRAPHQL_MAX_COMPLEXITY`. An invalid value fails `App.init()`.
 
 ## Subscriptions
 
-Create real-time GraphQL subscriptions:
-
 ```typescript
-import { GraphQLSubscription } from "bunsane/gql/Generator";
+import { BaseService, GraphQLSubscription } from "bunsane";
 
 class OrderService extends BaseService {
+    constructor(private app: App) {
+        super();
+    }
+
     @GraphQLSubscription({
+        input: { orderId: t.id().required() },
         output: OrderArcheType,
     })
-    async orderUpdated(args: { orderId: string }, context: GraphQLContext) {
-        return this.app.pubSub.subscribe(`orderUpdated_${args.orderId}`);
+    async orderUpdated(input: { orderId: string }) {
+        return this.app.pubSub.subscribe(`orderUpdated_${input.orderId}`);
     }
 }
 ```
 
-Publish events to trigger subscriptions:
+Publish from any service that holds the app:
 
 ```typescript
 this.app.pubSub.publish(`orderUpdated_${orderId}`, orderEntity);
 ```
 
-Subscriptions work over WebSocket. The GraphQL playground supports testing subscriptions out of the box.
+Subscriptions use GraphQL Yoga's default transport, Server-Sent Events. This app does not attach a WebSocket handler. GraphiQL can exercise them when GraphiQL is enabled.
 
-## Custom Context Factory
+## Context and Yoga plugins
 
-If you need to add custom data to the GraphQL context:
+Every operation can take a context argument. Shape it with `setGraphQLContextFactory` before `start()`:
 
 ```typescript
-export default class MyAPI extends App {
-    constructor() {
-        super("MyAPI", "1.0.0");
-
-        this.setGraphQLContextFactory((yogaContext) => {
-            return {
-                customData: "hello",
-                // Add anything you need in your resolvers
-            };
-        });
-    }
-}
+this.setGraphQLContextFactory((yogaContext) => {
+    return { request: yogaContext.request };
+});
 ```
 
-The factory receives the Yoga context (which includes the request) and returns an object that gets merged into the context available to all resolvers.
+The factory return value is merged into the context your resolvers see.
+
+BunSane uses [GraphQL Yoga](https://the-guild.dev/graphql/yoga-server). Add plugins with `addYogaPlugin` before `start()`:
+
+```typescript
+import { useJWT } from "@graphql-yoga/plugin-jwt";
+
+this.addYogaPlugin(useJWT({
+    // JWT configuration
+}));
+```
+
+A full JWT setup is in [Examples](./examples.md#jwt-authentication-setup).
+
+`isFieldRequested(info, fieldName)` is not on the root barrel. Import it from `"bunsane/gql/helpers"`. It returns false when there is no selection set.
+
+Operation middleware (`@Middleware`) is documented in [Middleware](./middleware.md). Import it from `"bunsane/gql"` or `"bunsane/gql/middleware"`.
+
+## Read models
+
+Registered `@ReadModel` classes add **Query** fields only (`list` / `count` / `sum` / `avg`). There are no generated mutations. See [Read models](./read-models.md).

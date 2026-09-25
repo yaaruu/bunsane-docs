@@ -5,16 +5,16 @@ sidebar_label: Your First Archetype
 
 # Your First Archetype
 
-In the previous section you defined components -- individual pieces of data. But in practice, you usually work with a group of components together. A "Todo" is not just a title or a status; it is a title *and* a description *and* a completed flag, all at once.
+In the previous section you defined components -- individual pieces of data. In practice you usually work with a group of them. A "Todo" is a title *and* a description *and* a completed flag.
 
-That is what an **Archetype** does: it groups related components into a named shape and automatically generates a GraphQL type from it.
+An **archetype** names that group and generates a GraphQL type from it.
 
 ## Define Todo Components
 
-First, create the components for a todo item. Create `src/components/TodoComponent.ts`:
+Create `src/components/TodoComponent.ts`:
 
 ```typescript title="src/components/TodoComponent.ts"
-import { Component, BaseComponent, CompData } from "bunsane/core/components";
+import { BaseComponent, CompData, Component } from "bunsane";
 
 @Component
 export class TodoTag extends BaseComponent {}
@@ -35,20 +35,15 @@ export class TodoInfoComponent extends BaseComponent {
 }
 ```
 
-`TodoTag` is a tag (empty component) that labels an entity as a "todo". `TodoInfoComponent` holds the actual data.
+`TodoTag` labels the entity as a todo. `TodoInfoComponent` holds the data. `createdAt` is a key-indexed `Date`, so you can sort lists by it. See [List queries](../query-lists.md).
 
 ## Create the Archetype
 
-Now create `src/archetypes/TodoArcheType.ts`:
+Create `src/archetypes/TodoArcheType.ts`:
 
 ```typescript title="src/archetypes/TodoArcheType.ts"
-import {
-    ArcheType,
-    ArcheTypeField,
-    BaseArcheType,
-    type ArcheTypeOwnProperties,
-} from "bunsane/core/ArcheType";
-import { TodoTag, TodoInfoComponent } from "../components/TodoComponent";
+import { ArcheType, ArcheTypeField, BaseArcheType } from "bunsane";
+import { TodoInfoComponent, TodoTag } from "../components/TodoComponent";
 
 @ArcheType("Todo")
 export class TodoArcheTypeClass extends BaseArcheType {
@@ -59,52 +54,55 @@ export class TodoArcheTypeClass extends BaseArcheType {
     info!: TodoInfoComponent;
 }
 
-export type ITodoArcheType = ArcheTypeOwnProperties<TodoArcheTypeClass>;
 export const TodoArcheType = new TodoArcheTypeClass();
 ```
 
-Here is what each part does:
+- **`@ArcheType("Todo")`** registers the name used as the GraphQL type. You can also pass `{ name: "Todo" }`.
+- **`@ArcheTypeField`** maps a component onto a field. `{ nullable: true }` means that component may be missing.
+- Export an **instance**. Pass that instance as `output` on `@GraphQLOperation`.
 
-- **`@ArcheType("Todo")`** registers this archetype with the name "Todo" -- this becomes the GraphQL type name
-- **`@ArcheTypeField(TodoInfoComponent)`** maps a component to a field on the archetype
-- **`ArcheTypeOwnProperties<T>`** extracts a TypeScript type for the archetype's data, useful for type-safe function signatures
-- **`new TodoArcheTypeClass()`** creates a singleton instance you'll use in your service
+You do not call `registerFieldResolvers`. Since 0.7, schema build attaches field, relation, and function resolvers. The method still exists and is idempotent if you already call it.
+
+Relations, computed fields, and the foreign-key rule are covered in [Archetypes](../core-concepts/archetype.md).
 
 ## What This Gives You
 
-By defining this archetype, BunSane will automatically generate:
+BunSane weaves an output type. It does not emit `TodoInput`. A tag with no `@CompData` fields is omitted. Nested component type names lower-case the first character of the class name:
 
 ```graphql
 type Todo {
-    tag: TodoTag!
-    info: TodoInfoComponent!
+    id: ID
+    info: todoInfoComponent!
 }
 
-input TodoInput {
-    tag: TodoTagInput!
-    info: TodoInfoComponentInput!
+type todoInfoComponent {
+    title: String!
+    description: String!
+    completed: Boolean!
+    createdAt: Date
 }
 ```
 
-You did not write any GraphQL schema by hand -- it is all derived from your TypeScript classes.
+Operation inputs are separate: `@GraphQLOperation` creates `createTodoInput`, not an archetype input type. `id` is `ID` only on the archetype's own id field (0.7+). A component property named `id` with type `string` stays `String`. A `Date` field is the `Date` scalar only because the property type is `Date`, not because the name ends in `At`.
 
 ## Register the Component
 
-Don't forget to import the component file in your App class so the `@Component` decorators run at startup:
+Import the component file from your App so the decorators run:
 
 ```typescript title="src/App.ts"
-import App from "bunsane/core/App";
+import "reflect-metadata";
+import { App } from "bunsane";
 
-// Import components so decorators are executed
 import "./components/TodoComponent";
 
 export default class MyAPI extends App {
     constructor() {
         super("TodoAPI", "0.1.0");
+        this.setCors({ origin: "http://localhost:5173" });
     }
 }
 ```
 
 ## What's Next
 
-You have an archetype that defines the shape of a Todo, but there is no way to create, read, update, or delete todos yet. In the next section, you will build a **Service** that exposes CRUD operations through GraphQL.
+The shape exists, but nothing creates or lists todos yet. Next you add a service.

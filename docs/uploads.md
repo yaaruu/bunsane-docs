@@ -4,56 +4,68 @@ sidebar_position: 8
 
 # File Uploads
 
-BunSane includes a complete file upload system that works across both GraphQL and REST endpoints. All upload functionality is imported from `bunsane/upload`.
+Upload helpers on the root barrel: `handleUpload`, `parseFormData`, `uploadResponse`, `uploadErrorResponse`, `UploadManager`. Decorators are not on the barrel. Import them from `"bunsane/upload"`. Importing `"bunsane"` does not register a storage provider (0.8+). `"local"` is registered lazily on the first `uploadFile`, `validateOnly`, `getStorageProvider`, or `setDefaultStorageProvider` call, not by `getInstance()` alone.
 
 ## GraphQL Uploads
 
-Use decorators on your archetype fields to add upload capabilities to GraphQL mutations.
+`@Upload`, `@RequiredUpload`, and `@BatchUpload` are **parameter** decorators on a service method. `@UploadField` decorates the method. They do not belong on archetype fields. `UploadDecorators.Avatar` is a factory: call it.
 
 ```typescript
-import { Upload, UploadField, BatchUpload, RequiredUpload } from "bunsane/upload";
+import { BaseService, GraphQLOperation, t } from "bunsane";
+import { Upload, UploadDecorators } from "bunsane/upload";
+
+class ProfileService extends BaseService {
+    @GraphQLOperation({
+        type: "Mutation",
+        input: { userId: t.id().required() },
+        output: "Boolean",
+    })
+    async setAvatar(input: { userId: string }, @Upload() file: File) {
+        return true;
+    }
+
+    @GraphQLOperation({
+        type: "Mutation",
+        output: "Boolean",
+    })
+    async setResume(@UploadDecorators.Document() file: File) {
+        return true;
+    }
+}
 ```
 
 ### Decorators
 
-**`@Upload`** -- marks a field as an optional single-file upload.
+**`@Upload()`** -- optional single-file parameter.
 
-**`@RequiredUpload`** -- marks a field as a required single-file upload.
+**`@RequiredUpload()`** -- required single-file parameter.
 
-**`@BatchUpload`** -- marks a field as an optional array of file uploads.
+**`@BatchUpload()`** -- optional array of files on a parameter.
 
-**`@UploadField`** -- low-level decorator for full control over the upload field configuration.
+**`@UploadField(config)`** -- method decorator that installs the same validation guard.
 
-### UploadDecorators Presets
+### UploadDecorators presets
 
-`UploadDecorators` provides ready-made configurations for common upload scenarios:
+Call the factory. Each returns a parameter decorator.
 
-```typescript
-import { UploadDecorators } from "bunsane/upload";
-
-class ProfileArcheType extends BaseArcheType {
-    @UploadDecorators.Avatar
-    avatar?: File;
-
-    @UploadDecorators.Document
-    resume?: File;
-}
-```
-
-| Preset | Max Size | Allowed Types |
+| Preset | Max size | Allowed types |
 |--------|----------|---------------|
-| `Image` | 10 MB | `image/*` |
-| `Avatar` | 2 MB | `image/jpeg`, `image/png`, `image/webp` |
-| `Document` | 25 MB | `application/pdf`, `text/plain`, common Office formats |
-| `Secure` | 5 MB | Strict allowlist, signature validation enabled |
+| `Image` | 5 MB | jpeg, png, gif, webp |
+| `Avatar` | 2 MB, required | jpeg, png, webp |
+| `Document` | 25 MB | pdf, plain text, common Office formats |
+| `Secure` | 1 MB | jpeg, png, signature check on. No malware scanner |
 
 ## REST Uploads
 
 Four utility functions handle file uploads in REST endpoints.
 
 ```typescript
-import { handleUpload, parseFormData, uploadResponse, uploadErrorResponse } from "bunsane/upload";
-import type { ParsedUpload, RestUploadOptions, RestUploadResult } from "bunsane/upload";
+import {
+    handleUpload,
+    parseFormData,
+    uploadErrorResponse,
+    uploadResponse,
+} from "bunsane";
 ```
 
 ### handleUpload
@@ -71,15 +83,20 @@ const result = await handleUpload(req, options?);
 | `maxFiles` | `number` | Reject the request if it contains more files than this |
 | `fieldNames` | `string[]` | Only process files from these form field names; ignore the rest |
 
+### Body limits
+
+These are HTTP limits, separate from `maxFileSize` on a single file.
+
+| Body | Default | Over the cap | Missing `Content-Length` |
+|---|---|---|---|
+| JSON and other non-multipart | 1 MB (`JSON_BODY_LIMIT`) | 413 `{ error, code: "PAYLOAD_TOO_LARGE", limit }` | Not rejected here. Chunked JSON stays under the Bun cap |
+| `multipart/form-data` | 50 MB (`MULTIPART_BODY_LIMIT`) | 413 | **411** `{ error: "Length Required", code: "LENGTH_REQUIRED", limit }` (0.8+) |
+
+`parseFormData` and `handleUpload` call the same check and throw `LengthRequiredError` (from `"bunsane/core/app/bodyLimit"`, not from `"bunsane/upload"`). Browsers and `fetch(url, { body: formData })` send `Content-Length`. An in-process `new Request(url, { body: formData })` does not — set the header in tests. See [Upgrading](./upgrading.md).
+
 ### parseFormData
 
-Parses a `multipart/form-data` request and separates `File` entries from string fields. Throws if the request `Content-Type` is not `multipart/form-data`.
-
-```typescript
-const { files, fields } = await parseFormData(req);
-```
-
-Use this directly when you need access to the raw files and form fields before running any upload logic.
+Parses `multipart/form-data` and separates `File` entries from string fields. Throws if the `Content-Type` is not multipart, and throws `LengthRequiredError` when `Content-Length` is missing.
 
 ### uploadResponse
 
@@ -105,8 +122,8 @@ return uploadErrorResponse(error, code?, status?);
 ### Example: REST Upload Endpoint
 
 ```typescript
-import { BaseService, Post } from "bunsane/service";
-import { handleUpload, uploadResponse, uploadErrorResponse } from "bunsane/upload";
+import { BaseService, handleUpload, uploadErrorResponse, uploadResponse } from "bunsane";
+import { Post } from "bunsane/service";
 
 class AvatarService extends BaseService {
     @Post("/api/avatars")
@@ -129,19 +146,20 @@ class AvatarService extends BaseService {
 
 ## Upload Configuration
 
-The `UploadConfiguration` interface controls validation and storage behaviour for every upload.
+Per-file validation. HTTP body caps above still apply.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `maxFileSize` | `number` | `10_000_000` | Maximum file size in bytes |
-| `allowedMimeTypes` | `string[]` | `[]` (all) | Permitted MIME types |
-| `allowedExtensions` | `string[]` | `[]` (all) | Permitted file extensions |
-| `validateFileSignature` | `boolean` | `false` | Verify file magic bytes match the declared MIME type |
+| `allowedMimeTypes` | `string[]` | images and common documents; **SVG excluded** | Permitted MIME types |
+| `allowedExtensions` | `string[]` | matching extensions | Permitted file extensions |
+| `validateFileSignature` | `boolean` | `true` | Verify file magic bytes match the declared MIME type |
 | `sanitizeFileName` | `boolean` | `true` | Strip unsafe characters from file names |
 | `preserveOriginalName` | `boolean` | `false` | Keep the original file name instead of generating one |
-| `uploadPath` | `string` | `"uploads/"` | Destination path relative to the storage root |
+| `uploadPath` | `string` | `"uploads"` | Destination path relative to the storage root |
 | `namingStrategy` | `"uuid"` \| `"timestamp"` \| `"original"` | `"uuid"` | File naming strategy when `preserveOriginalName` is false |
-| `storageProvider` | `string` | — | Override the default storage provider for this upload |
+
+`generateThumbnails`, `imageProcessing`, and `scanForMalware` were removed (0.7+). They were never implemented. Delete them from your config. `UploadConfiguration.storageProvider` is not read. Pass `storageProvider` as the top-level option to `handleUpload` (or the third argument of `UploadManager.uploadFile`).
 
 ### Preset Configurations
 
@@ -164,39 +182,27 @@ const result = await handleUpload(req, {
 ## Storage Providers
 
 ### LocalStorageProvider
-
-The built-in default. Writes files to the local filesystem under `uploadPath`.
-
-No setup required -- it is active by default.
+Local disk is the default provider. `UploadManager.getInstance()` only constructs the singleton. `"local"` is registered the first time something asks for a provider (`uploadFile`, `validateOnly`, `getStorageProvider`, or `setDefaultStorageProvider`). Importing the package does not register it. `LocalStorageProvider` is exported from `"bunsane/upload"`.
 
 ### S3StorageProvider
 
-S3-compatible object storage powered by `Bun.S3Client`. Zero external dependencies. Compatible with AWS S3, MinIO, Cloudflare R2, and DigitalOcean Spaces.
+S3-compatible storage (`Bun.S3Client`): AWS S3, MinIO, Cloudflare R2, DigitalOcean Spaces. The class lives at `"bunsane/storage/S3StorageProvider"` and is re-exported from `"bunsane/upload"`.
+
+Call `initializeS3Storage` from an async path before you accept uploads. It creates an `S3StorageProvider`, checks connectivity, and registers it as `"s3"`. Do not `await` it inside a synchronous constructor.
 
 ```typescript
-import { S3StorageProvider, initializeS3Storage } from "bunsane/upload";
-import type { S3StorageConfig } from "bunsane/upload";
-```
-
-#### Quick Setup
-
-Call `initializeS3Storage` during app initialization. It creates an `S3StorageProvider`, verifies connectivity, and registers it with `UploadManager` under the name `"s3"`.
-
-```typescript
+import { App } from "bunsane";
 import { initializeS3Storage } from "bunsane/upload";
 
-export default class MyAPI extends App {
-    constructor() {
-        super("MyAPI", "1.0.0");
-
-        await initializeS3Storage({
-            bucket: "my-app-uploads",
-            region: "us-east-1",
-            keyPrefix: "uploads/",
-        });
-    }
-}
+const app = new App("MyAPI", "1.0.0");
+await initializeS3Storage({
+    bucket: "my-app-uploads",
+    region: "us-east-1",
+    keyPrefix: "uploads/",
+});
+await app.init();
 ```
+
 
 #### S3StorageConfig
 
@@ -211,16 +217,18 @@ export default class MyAPI extends App {
 | `acl` | `"private"` \| `"public-read"` | `"private"` | Default ACL applied to stored objects |
 | `keyPrefix` | `string` | `""` | Prefix prepended to every S3 key (e.g. `"uploads/"`) |
 | `presignExpiry` | `number` | `3600` | Presigned URL expiry in seconds |
+| `publicPresignExpiry` | `number` | `86400` | Public presigned URL expiry in seconds |
 
 #### Environment Variables
 
-S3 is opt-in. All configuration can be provided via environment variables:
+S3 is opt-in. Pass `bucket` in the config. The provider does not read `S3_BUCKET`. These variables are fallbacks when the matching config field is omitted:
 
-- `S3_BUCKET`
 - `S3_REGION`
 - `S3_ENDPOINT`
 - `S3_ACCESS_KEY_ID`
 - `S3_SECRET_ACCESS_KEY`
+
+`validateEnv` checks that a set `S3_BUCKET` is paired with keys. It does not wire the bucket into `S3StorageProvider`.
 
 #### Manual Setup
 
@@ -264,7 +272,7 @@ For Cloudflare R2, set `endpoint` to your R2 account endpoint (`https://<account
 `UploadManager` is the singleton that coordinates providers and global configuration. You interact with it directly when registering providers or adjusting defaults at runtime.
 
 ```typescript
-import { UploadManager } from "bunsane/upload";
+import { UploadManager } from "bunsane";
 
 const manager = UploadManager.getInstance();
 

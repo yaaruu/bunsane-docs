@@ -5,34 +5,32 @@ sidebar_label: Services
 
 # Services
 
-Services are where your application logic lives. They contain your GraphQL operations, REST endpoints, entity hooks, and subscriptions. This is the single reference for everything related to services in BunSane.
+Services hold application logic: GraphQL operations, REST endpoints, entity hooks, and subscriptions.
 
 ## Creating a Service
 
-Extend `BaseService` and pass the `App` instance:
+Extend `BaseService`. Pass the `App` only if the service needs it.
 
 ```typescript
-import { BaseService } from "bunsane/service";
-import App from "bunsane/core/App";
+import { App, BaseService } from "bunsane";
 
 class UserService extends BaseService {
     constructor(private app: App) {
         super();
-        UserArcheType.registerFieldResolvers(this);
     }
 }
 
 export default UserService;
 ```
 
-If your archetype has computed fields or relations, call `registerFieldResolvers()` in the constructor.
+You do not call `registerFieldResolvers`. Schema build attaches archetype field, relation, and function resolvers (0.7+). The method remains and is idempotent.
 
 ## Registering Services
 
-Register services in your App class using `ServiceRegistry`:
+`ServiceRegistry` on the root barrel is the singleton instance. The method is `registerService`, not `register`.
 
 ```typescript
-import { ServiceRegistry } from "bunsane/service";
+import { App, ServiceRegistry } from "bunsane";
 import UserService from "./services/UserService";
 import OrderService from "./services/OrderService";
 
@@ -46,35 +44,33 @@ export default class MyAPI extends App {
 }
 ```
 
-Make sure to import your component files in the App so their `@Component` decorators run:
+Import component files from the App so `@Component` decorators run:
 
 ```typescript
-// Import components to ensure decorators are executed
 import "./components/UserComponent";
 import "./components/OrderComponent";
 ```
 
+`App.rebuildGraphQLSchema()` rebuilds after a late registration.
+
 ## GraphQL Operations
 
-Use `@GraphQLOperation` to create GraphQL queries and mutations. This is the decorator-based approach -- you explicitly mark each method and specify whether it is a query or mutation.
-
-### Queries
+`@GraphQLOperation` marks a query or mutation. With a `t.*` input, the method is checked as `(input, ctx?, info?) => output`.
 
 ```typescript
-import { GraphQLOperation } from "bunsane/gql";
-import type { GraphQLContext, GraphQLInfo } from "bunsane/types/graphql.types";
+import { Entity, GraphQLOperation, t } from "bunsane";
 
 class UserService extends BaseService {
     @GraphQLOperation({
         type: "Query",
+        input: { id: t.id().required() },
         output: UserArcheType,
     })
-    async profile(args: {}, context: GraphQLContext, info?: GraphQLInfo) {
-        const userId = context.jwt.payload.user_id;
-        const user = await Entity.FindById(userId);
+    async profile(input: { id: string }) {
+        const user = await Entity.FindById(input.id);
         if (!user) {
-            return new GraphQLError("User not found", {
-                extensions: { code: "NOT_FOUND" }
+            throw new GraphQLError("User not found", {
+                extensions: { code: "NOT_FOUND" },
             });
         }
         return user;
@@ -82,152 +78,104 @@ class UserService extends BaseService {
 }
 ```
 
+Clients pass one argument named `input`. The method receives the unwrapped object.
+
+### Operation options
+
+| Option | Description |
+|---|---|
+| `type` | `"Query"` or `"Mutation"` |
+| `name` | Field name. Defaults to the method name |
+| `input` | `t.*` field map. Zod and `{ field: "String!" }` still work and log a deprecation warning |
+| `output` | Return type. An unrecognised value throws at schema build |
+
+### Output kinds
+
+| `output` | Result |
+|---|---|
+| Archetype instance or class | that GraphQL type |
+| `[TodoArcheType]` | a list of that type |
+| `"Boolean"`, `"String"`, `"Int"`, or another type-name string | that name |
+| `{ ok: "Boolean!", id: "ID!" }` | a generated object type |
+
+A Zod schema, an empty array, an empty string, or a field map that is not all strings throws at schema build. It does not become `[Any]`. The decorator itself coerces some other values to the string `"String"` before that check: a non-archetype class, `null`, or a number. Pass an archetype, a type-name string, an archetype array, or a string field map so you do not silently get `String`.
+
 ### Mutations
 
 ```typescript
+import { Entity, GraphQLOperation, t, type InferInput } from "bunsane";
+
+const createInput = {
+    title: t.string().required(),
+    description: t.string(),
+};
+
 @GraphQLOperation({
     type: "Mutation",
-    input: z.object({
-        title: z.string(),
-        description: z.string(),
-    }),
+    input: createInput,
     output: TodoArcheType,
 })
-async createTodo(
-    args: { title: string; description: string },
-    context: GraphQLContext
-) {
+async createTodo(input: InferInput<typeof createInput>) {
     const todo = Entity.Create()
         .add(TodoTag, {})
         .add(TodoInfoComponent, {
-            title: args.title,
-            description: args.description,
+            title: input.title,
+            description: input.description ?? "",
         });
     await todo.save();
     return todo;
 }
 ```
 
-### Operation Options
+### Returning lists
 
-The `@GraphQLOperation` decorator accepts:
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `type` | `"Query"` or `"Mutation"` | Whether this is a GraphQL query or mutation |
-| `input` | Zod schema or archetype input | Defines the input arguments and generates a GraphQL input type |
-| `output` | Archetype instance | Defines the return type and generates a GraphQL output type |
-
-### Returning Lists
-
-Wrap the archetype in an array to return a list:
+Wrap the archetype in an array. Call `.take()` so the query is bounded. See [List queries](../query-lists.md).
 
 ```typescript
 @GraphQLOperation({
     type: "Query",
     output: [TodoArcheType],
 })
-async listTodos(args: {}, context: GraphQLContext) {
-    return await new Query().with(TodoTag).exec();
+async listTodos() {
+    return await new Query().with(TodoTag).take(20).exec();
 }
 ```
 
-## Input Validation with Zod
+## Inputs
 
-You can use [Zod](https://zod.dev/) schemas as operation inputs. BunSane converts them to GraphQL input types.
+Use `t.*` from `"bunsane"`. Fields are optional until `.required()`. `t.object` and `t.enum` require a name. There is no `t.date()`.
 
 ```typescript
-import { z } from "zod";
-
-@GraphQLOperation({
-    type: "Mutation",
-    input: z.object({
-        latitude: z.number(),
-        longitude: z.number(),
-    }),
-    output: UserArcheType,
-})
-async updatePosition(
-    args: { latitude: number; longitude: number },
-    context: GraphQLContext
-) {
-    // ...
+input: {
+    email: t.string().required().email(),
+    status: t.enum(["open", "closed"] as const, "OrderStatus"),
 }
 ```
 
-:::caution Zod Type Limitations
+`.email()`, `.minLength()`, and `.min()` are runtime checks. They are not copied into the SDL.
 
-Only simple Zod types are supported for GraphQL schema generation: `z.string()`, `z.number()`, `z.boolean()`, `z.enum()`, and `z.object()`. Complex chains like `.min()`, `.max()`, `.email()` are **not** reflected in the generated GraphQL schema. If you need complex validation, validate inside your resolver method.
+Zod object inputs and string maps still parse. Both log a deprecation warning and will be removed before 1.0. Do not start new operations with them.
 
-:::
-
-### Using Archetype Schemas as Input
-
-You can derive input schemas from archetypes:
-
-```typescript
-@GraphQLOperation({
-    type: "Mutation",
-    input: UserArcheType.getInputSchema().partial().pick({
-        name: true,
-    }),
-    output: UserArcheType,
-})
-async updateProfile(args: any, context: GraphQLContext) {
-    const user = await Entity.FindById(context.jwt.payload.user_id);
-    if (!user) {
-        return new GraphQLError("User not found", {
-            extensions: { code: "NOT_FOUND" }
-        });
-    }
-    const updated = await UserArcheType.updateEntity(user, args);
-    await updated.save();
-    return updated;
-}
-```
-
-### Enum Types in GraphQL
-
-Register enum types using `asEnumType`:
-
-```typescript
-import { asEnumType } from "bunsane/core/ArcheType";
-
-@GraphQLOperation({
-    type: "Mutation",
-    input: z.object({
-        payment_method: z.enum(["cash", "credit_card"]).register(asEnumType, {
-            name: "PaymentMethod",
-        }),
-    }),
-    output: OrderArcheType,
-})
-async createOrder(args: { payment_method: "cash" | "credit_card" }, context: GraphQLContext) {
-    // ...
-}
-```
+`getInputSchema()` on an archetype is for in-process Zod checks. Prefer `t.*` for the GraphQL argument.
 
 ## REST Endpoints
 
-Use HTTP method decorators to create REST routes:
+HTTP decorators are not on the root barrel.
 
 ```typescript
-import { BaseService, Get, Post, Put, Delete } from "bunsane/service";
+import { BaseService } from "bunsane";
+import { Delete, Get, Post, Put } from "bunsane/service";
 
 class AuthService extends BaseService {
     @Get("/v1/health")
     async healthCheck() {
-        return Response.json({ status: "ok" }, { status: 200 });
+        return Response.json({ status: "ok" });
     }
 
     @Post("/v1/auth/register")
     async registerUser(req: Request) {
         const body = await req.json();
-        // Validate and process...
-        return Response.json(
-            { message: "User registered", data: { id: user.id } },
-            { status: 201 }
-        );
+        return Response.json({ id: user.id }, { status: 201 });
     }
 
     @Put("/v1/users/:id")
@@ -242,317 +190,105 @@ class AuthService extends BaseService {
 }
 ```
 
-REST handlers receive the raw `Request` object and should return a `Response`.
+Handlers receive the raw `Request` and return a `Response`. JSON bodies default to 1 MB. A multipart body without `Content-Length` returns 411. See [Uploads](../uploads.md).
 
-## OpenAPI Documentation
+## OpenAPI
 
-Add OpenAPI documentation to your REST endpoints with `@ApiDocs` and `@ApiTags`:
+`@ApiDocs` and `@ApiTags` come from `"bunsane/swagger"`.
 
-```typescript
-import { ApiDocs, ApiTags } from "bunsane/swagger";
-
-const RegisterSchema = z.object({
-    email: z.string(),
-    name: z.string(),
-    password: z.string(),
-});
-
-@ApiTags("Authentication")
-class AuthService extends BaseService {
-    @Post("/v1/auth/register")
-    @ApiDocs({
-        summary: "Register a new user",
-        description: "Register a new user with email, password, and name",
-        requestBody: {
-            required: true,
-            content: {
-                "application/json": {
-                    schema: z.toJSONSchema(RegisterSchema),
-                },
-            },
-        },
-        responses: {
-            "201": { description: "User registered successfully" },
-            "400": { description: "Validation error" },
-        },
-    })
-    async registerUser(req: Request) {
-        const body = await req.json();
-        const parse = RegisterSchema.safeParse(body);
-        if (!parse.success) {
-            return Response.json(
-                { errors: parse.error.issues },
-                { status: 400 }
-            );
-        }
-        // Process registration...
-    }
-}
-```
-
-The OpenAPI spec is served at `http://localhost:3000/openapi.json` and a Swagger UI is available at `http://localhost:3000/docs`.
+`/openapi.json` and `/docs` return **404** unless you set `BUNSANE_DOCS_TOKEN` (at least 16 characters) or `BUNSANE_DOCS=public` (0.7+). Send `Authorization: Bearer <token>` or `x-docs-token`. See [Configuration](../configuration.md).
 
 ## Entity Hooks
 
-React to entity lifecycle events with `@ComponentTargetHook`. Hooks fire automatically when entities with specific components are created or updated.
+`@ComponentTargetHook` reacts when an entity with the listed components is created or updated. Import it from `"bunsane/core/decorators/EntityHooks"`.
 
-```typescript
-import { ComponentTargetHook } from "bunsane/core/decorators/EntityHooks";
-import type { EntityCreatedEvent, EntityUpdatedEvent } from "bunsane/core/events/EntityLifecycleEvents";
-
-class OrderService extends BaseService {
-    @ComponentTargetHook("entity.created", {
-        includeComponents: [OrderTag, OrderInfoComponent],
-    })
-    async onOrderCreated(event: EntityCreatedEvent) {
-        const orderEntity = event.entity;
-        const infoComp = await orderEntity.get(OrderInfoComponent);
-        if (!infoComp) return;
-
-        console.log("New order created:", orderEntity.id);
-    }
-
-    @ComponentTargetHook("entity.updated", {
-        includeComponents: [OrderTag, OrderStatusComponent],
-    })
-    async onOrderStatusUpdated(event: EntityUpdatedEvent) {
-        const orderEntity = event.entity;
-        const statusComp = await orderEntity.get(OrderStatusComponent);
-        if (!statusComp) return;
-
-        this.app.pubSub.publish(`orderUpdated_${orderEntity.id}`, orderEntity);
-    }
-}
-```
-
-The hook fires only for entities that have **all** the components listed in `includeComponents`.
+An `async: true` hook is not awaited on the save path (0.7+). Errors are logged. Shutdown still drains the queue. See [Entity Hooks](../hooks.md).
 
 ## GraphQL Subscriptions
 
-Create real-time subscriptions using PubSub:
-
 ```typescript
-import { GraphQLSubscription } from "bunsane/gql/Generator";
+import { GraphQLSubscription, t } from "bunsane";
 
-class OrderService extends BaseService {
-    @GraphQLSubscription({
-        output: OrderArcheType,
-    })
-    async orderUpdated(args: { orderId: string }, context: GraphQLContext) {
-        return this.app.pubSub.subscribe(`orderUpdated_${args.orderId}`);
-    }
+@GraphQLSubscription({
+    input: { orderId: t.id().required() },
+    output: OrderArcheType,
+})
+async orderUpdated(input: { orderId: string }) {
+    return this.app.pubSub.subscribe(`orderUpdated_${input.orderId}`);
 }
 ```
 
-Publish events from any method in any service:
+Publish from any method that holds the app:
 
 ```typescript
 this.app.pubSub.publish(`orderUpdated_${orderId}`, orderEntity);
 ```
 
-## GraphQL Context
+## Context
 
-Every GraphQL operation receives a `context` object with useful properties:
+The second argument is the GraphQL context. Shape it with `setGraphQLContextFactory` before `start()`. JWT fields exist only if you installed a JWT plugin. See [JWT Authentication Setup](../examples.md#jwt-authentication-setup).
 
-```typescript
-async getUser(args: { id: string }, context: GraphQLContext) {
-    // Access authenticated user's JWT payload
-    const currentUserId = context.jwt?.payload?.user_id;
-
-    // Use DataLoaders for efficient batching
-    const user = await context.loaders.entity.load(args.id);
-
-    return user;
-}
-```
-
-- **`context.jwt`** -- JWT payload (available when using the JWT plugin)
-- **`context.loaders`** -- DataLoaders for efficient batched data fetching
+`isFieldRequested` is not on the root barrel. Import it from `"bunsane/gql/helpers"`.
 
 ## Error Handling
 
-### In GraphQL Operations
-
-Return or throw `GraphQLError`:
+Throw or return `GraphQLError`. `responseError` from `"bunsane/core/ErrorHandler"` builds one with a default `UNKNOWN_ERROR` code.
 
 ```typescript
 import { GraphQLError } from "graphql";
 import { responseError } from "bunsane/core/ErrorHandler";
 
-// Option 1: Return a GraphQLError
 if (!user) {
-    return new GraphQLError("User not found", {
-        extensions: { code: "NOT_FOUND" }
+    throw new GraphQLError("User not found", {
+        extensions: { code: "NOT_FOUND" },
     });
 }
 
-// Option 2: Use the responseError helper
-if (!user) {
-    return responseError("User not found", {
-        extensions: { code: "NOT_FOUND" }
-    });
-}
+return responseError("User not found", {
+    extensions: { code: "NOT_FOUND" },
+});
 ```
 
-### In REST Endpoints
-
-Return standard `Response` objects:
+REST handlers return a `Response`:
 
 ```typescript
-return Response.json(
-    { errors: ["Invalid input"] },
-    { status: 400 }
-);
+return Response.json({ errors: ["Invalid input"] }, { status: 400 });
 ```
-
-## Authentication
-
-Access the JWT payload from the GraphQL context:
-
-```typescript
-@GraphQLOperation({
-    type: "Query",
-    output: UserArcheType,
-})
-async profile(args: {}, context: GraphQLContext) {
-    if (!context.jwt?.payload?.user_id) {
-        return responseError("Authentication required", {
-            extensions: { code: "UNAUTHENTICATED" }
-        });
-    }
-
-    const userId = context.jwt.payload.user_id;
-    return await Entity.FindById(userId);
-}
-```
-
-The `context.jwt` object is available when you configure the JWT plugin. See the [JWT Authentication Setup](/docs/examples#jwt-authentication-setup) example for full setup instructions.
 
 ## File Uploads
 
-Handle file uploads in GraphQL mutations:
-
-```typescript
-import { Upload } from "bunsane/gql";
-import { UploadManager } from "bunsane/upload";
-
-@GraphQLOperation({
-    type: "Mutation",
-    input: z.object({
-        file: Upload,
-    }),
-    output: UserArcheType,
-})
-async uploadProfilePicture(args: { file: any }, context: GraphQLContext) {
-    const userId = context.jwt.payload.user_id;
-    const user = await Entity.FindById(userId);
-    if (!user) return responseError("User not found");
-
-    const uploadManager = UploadManager.getInstance();
-    const uploadResult = await uploadManager.uploadFile(args.file, {
-        maxFileSize: 5 * 1024 * 1024, // 5MB
-    });
-
-    if (!uploadResult.success) return responseError("Failed to upload file");
-
-    await user.set(ProfilePictureComponent, { path: uploadResult.path });
-    await user.save();
-    return user;
-}
-```
+Upload decorators are not on the root barrel. Import them from `"bunsane/upload"`. See [File Uploads](../uploads.md) for limits, the 411 rule, and S3.
 
 ## Logging
 
-Use the built-in structured logger:
-
 ```typescript
-import { logger as MainLogger } from "bunsane/core/Logger";
+import { logger as MainLogger } from "bunsane";
 
 const logger = MainLogger.child({ service: "UserService" });
-
-class UserService extends BaseService {
-    async someMethod() {
-        logger.trace({ msg: "Detailed debug info" });
-        logger.info({ msg: "Normal operation" });
-        logger.warn({ msg: "Something unexpected" });
-        logger.error({ msg: "Something went wrong" });
-    }
-}
 ```
 
 ## Service Communication
 
-Services can communicate through several patterns:
-
-### PubSub Events
-
-Use `app.pubSub` for loose coupling between services:
+Publish on `app.pubSub` when services should not import each other:
 
 ```typescript
-// Publishing service
-class OrderService extends BaseService {
-    async completeOrder(orderId: string) {
-        const order = await Entity.FindById(orderId);
-        await order.set(OrderStatusComponent, { value: "completed" });
-        await order.save();
-        this.app.pubSub.publish("order.completed", { orderId, order });
-    }
-}
-
-// Subscribing service
-class NotificationService extends BaseService {
-    constructor(private app: App) {
-        super();
-        this.app.pubSub.subscribe("order.completed", this.onOrderCompleted.bind(this));
-    }
-
-    async onOrderCompleted(data: { orderId: string; order: Entity }) {
-        // Send notification...
-    }
-}
+this.app.pubSub.publish("order.completed", { orderId, order });
 ```
 
-### Entity Hooks
-
-Use `@ComponentTargetHook` to react to data changes across services (described above).
+Subscribe in the constructor. For data-change reactions, prefer a hook. See [Entity Hooks](../hooks.md).
 
 ## Organizing Services
-
-A recommended project structure:
 
 ```
 src/
   components/
-    UserComponent.ts
-    OrderComponent.ts
   archetypes/
-    UserArcheType.ts
-    OrderArcheType.ts
   services/
     AuthService.ts
     UserService.ts
     OrderService.ts
-    admin/
-      AdminUserService.ts
   App.ts
 index.ts
 ```
 
-Register all services in your App constructor:
-
-```typescript
-export default class MyAPI extends App {
-    constructor() {
-        super("MyAPI", "1.0.0");
-
-        ServiceRegistry.registerService(new AuthService(this));
-        ServiceRegistry.registerService(new UserService(this));
-        ServiceRegistry.registerService(new OrderService(this));
-
-        // Conditional registration
-        if (process.env.NODE_ENV === "development") {
-            ServiceRegistry.registerService(new DebugService(this));
-        }
-    }
-}
-```
+Register every service in the App constructor, before `init()` / `start()`.

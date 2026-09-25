@@ -5,793 +5,319 @@ sidebar_label: Quick Reference
 
 # Quick Reference
 
-Copy-paste ready code snippets for common BunSane operations.
+Cheat sheet for `main` (0.8.0 + unreleased 0.9). npm `latest` is 0.6.1. Full rules: [Overview](./index.md).
 
-## Imports by Module
+## Imports
 
-All imports follow the pattern `bunsane/<module>`. Copy the imports you need.
-
-### Entity & Components
-```typescript
-import { Entity } from "bunsane/core/Entity";
-import { BaseComponent, CompData, Component, ComponentRegistry } from "bunsane/core/components";
-```
-
-### ArcheType
 ```typescript
 import {
-    ArcheType,
-    ArcheTypeField,
-    ArcheTypeFunction,
-    BaseArcheType,
-    type ArcheTypeOwnProperties,
-    HasOne,
-    HasMany,
-    BelongsTo,
-    asEnumType
-} from "bunsane/core/ArcheType";
+  App,
+  Entity,
+  BaseComponent,
+  Component,
+  CompData,
+  CompositeIndex,
+  BaseArcheType,
+  ArcheType,
+  ArcheTypeField,
+  ArcheTypeFunction,
+  HasMany,
+  HasOne,
+  BelongsTo,
+  BelongsToMany,
+  Query,
+  or,
+  FilterOp,
+  BaseService,
+  ServiceRegistry,
+  GraphQLOperation,
+  GraphQLSubscription,
+  t,
+  type InferInput,
+  logger,
+  withLock,
+  ScheduledTask,
+  handleUpload,
+  uploadResponse,
+  uploadErrorResponse,
+  rateLimit,
+} from "bunsane";
 ```
 
-### Query
+Not on the barrel:
+
 ```typescript
-import { Query, or } from "bunsane/query";
-```
-
-### Service & REST
-```typescript
-import { BaseService, ServiceRegistry, Get, Post, Put, Delete, Patch } from "bunsane/service";
-```
-
-### GraphQL
-```typescript
-import { GraphQLOperation, isFieldRequested } from "bunsane/gql";
-import { GraphQLSubscription } from "bunsane/gql/Generator";
-```
-
-### Application & Database
-```typescript
-import App from "bunsane/core/App";
-import db from "bunsane/database";
-```
-
-### Types
-```typescript
-import type { GraphQLContext, GraphQLInfo } from "bunsane/types/graphql.types";
-```
-
-### Utilities
-```typescript
-import { logger } from "bunsane/core/Logger";
-import { responseError } from "bunsane/core/ErrorHandler";
-import { BatchLoader } from "bunsane/core/BatchLoader";
-```
-
-### Hooks
-```typescript
-import { ComponentTargetHook, EntityHook, LifecycleHook } from "bunsane/core/decorators/EntityHooks";
-import type { EntityCreatedEvent, EntityUpdatedEvent, EntityDeletedEvent } from "bunsane/core/events/EntityLifecycleEvents";
-```
-
-### Scheduler
-```typescript
-import { ScheduledTask, ScheduleInterval, registerScheduledTasks } from "bunsane/scheduler";
-```
-
-### Distributed Lock
-```typescript
-import { withLock } from "bunsane/core";
-// const { acquired, result } = await withLock("key", async () => {...}, { wait: 5000 });
-```
-
-### Swagger
-```typescript
-import { ApiDocs, ApiTags } from "bunsane/swagger";
-```
-
-### Upload
-```typescript
-// Core upload system
-import { UploadManager, Upload, UploadField, UploadComponent } from "bunsane/upload";
-
-// REST upload utilities
-import { handleUpload, parseFormData, uploadResponse, uploadErrorResponse } from "bunsane/upload";
-import type { ParsedUpload, RestUploadOptions, RestUploadResult } from "bunsane/upload";
-
-// S3 storage provider
-import { S3StorageProvider, initializeS3Storage } from "bunsane/upload";
-import type { S3StorageConfig } from "bunsane/upload";
-```
-
-### Plugins
-```typescript
-import BasePlugin from "bunsane/plugins";
-```
-
-### Enums
-```typescript
+import { Get, Post, Put, Delete, Patch } from "bunsane/service";
+import { getDb, closeDatabase } from "bunsane/database";
+import { dbTransaction } from "bunsane/database/gateway";
+import { IndexedField } from "bunsane/core/decorators/IndexedField";
+import { ReadModel, Project } from "bunsane/core/readmodel";
+import { Upload, initializeS3Storage } from "bunsane/upload";
+import { S3StorageProvider } from "bunsane/storage/S3StorageProvider";
+import { Middleware } from "bunsane/gql/middleware";
+import { isFieldRequested } from "bunsane/gql/helpers";
+import { ComponentLoadError, ComponentMissingError } from "bunsane/core/Entity";
+import { LengthRequiredError } from "bunsane/core/app/bodyLimit";
 import { Enum } from "bunsane/core/metadata";
+import type { ArcheTypeOwnProperties } from "bunsane/core/ArcheType";
+import type { GraphQLContext } from "bunsane/types/graphql.types";
 ```
 
-### External (always needed)
-```typescript
-import { z } from "zod";
-import { GraphQLError } from "graphql";
-```
+`ServiceRegistry.registerService(service)`. Not `register()`. `BatchLoader` is removed.
 
-## Component Definition
-
-```typescript
-// Data component
-@Component
-export class NameComponent extends BaseComponent {
-    @CompData()
-    value: string = "";
-}
-
-// Component with indexed field
-@Component
-export class EmailComponent extends BaseComponent {
-    @CompData({ indexed: true })
-    value: string = "";
-
-    @CompData()
-    verified: boolean = false;
-}
-
-// Tag (empty component for categorization)
-@Component
-export class UserTag extends BaseComponent {}
-```
-
-## Entity Operations
-
-```typescript
-// Create
-const entity = Entity.Create()
-    .add(UserTag, {})
-    .add(NameComponent, { value: "John" });
-await entity.save();
-
-// Find by ID
-const entity = await Entity.FindById(id);
-
-// Get component
-const name = await entity.get(NameComponent);
-
-// Set component
-await entity.set(NameComponent, { value: "Jane" });
-await entity.save();
-
-// Add component
-entity.add(PremiumTag, {});
-await entity.save();
-
-// Remove component
-await entity.remove(PremiumTag);
-await entity.save();
-
-// Delete entity
-await entity.delete();
-```
-
-## Query Operations
-
-```typescript
-// Basic query
-const users = await new Query()
-    .with(UserTag)
-    .exec();
-
-// With filter
-const users = await new Query()
-    .with(
-        EmailComponent,
-        Query.filters(
-            Query.filter("value", Query.filterOp.EQ, "john@example.com")
-        )
-    )
-    .exec();
-
-// Multiple filters
-const products = await new Query()
-    .with(
-        PriceComponent,
-        Query.filters(
-            Query.filter("amount", Query.filterOp.GTE, 10),
-            Query.filter("amount", Query.filterOp.LTE, 100)
-        )
-    )
-    .exec();
-
-// Exclude
-const active = await new Query()
-    .with(UserTag)
-    .without(DeletedTag)
-    .exec();
-
-// List page (hasNextPage — prefer over count for load-more)
-const q = new Query()
-    .with(UserTag)
-    .with(ProfileComponent)
-    .sortBy(ProfileComponent, "createdAt", "DESC")
-    .take(20);
-const users = await q.exec();
-const { hasNextPage } = q.getLastRouteInfo();
-
-// Next sorted page — sortedCursor (NOT .cursor(id) with sortBy — throws)
-const last = users[users.length - 1]!;
-const profile = await last.get(ProfileComponent);
-const token = Query.encodeSortedCursor(profile!.createdAt, last.id);
-const page2 = await new Query()
-    .with(UserTag)
-    .with(ProfileComponent)
-    .sortBy(ProfileComponent, "createdAt", "DESC")
-    .take(20)
-    .sortedCursor(token)
-    .exec();
-
-// Eager load (avoid N+1)
-const batch = await new Query()
-    .with(UserTag)
-    .eagerLoadComponents([ProfileComponent, EmailComponent])
-    .take(50)
-    .exec();
-
-// Exact count (expensive on large filtered sets)
-const count = await new Query().with(UserTag).count();
-```
-
-See [List queries](../query-lists.md) and [Query optimization](./query-optimization.md).
-
-## Filter Operators
-
-```typescript
-Query.filterOp.EQ       // equals
-Query.filterOp.NEQ      // not equals
-Query.filterOp.GT       // greater than
-Query.filterOp.GTE      // greater than or equal
-Query.filterOp.LT       // less than
-Query.filterOp.LTE      // less than or equal
-Query.filterOp.LIKE     // pattern match (use % wildcard)
-Query.filterOp.IN       // value in array
-Query.filterOp.NOT_IN   // value not in array
-```
-
-## Archetype Definition
-
-```typescript
-@ArcheType("User")
-export class UserArcheTypeClass extends BaseArcheType {
-    @ArcheTypeField(NameComponent)
-    name!: NameComponent;
-
-    @ArcheTypeField(EmailComponent, { nullable: true })
-    email!: EmailComponent;
-
-    @ArcheTypeFunction({ returnType: "String" })
-    async displayName(entity: Entity) {
-        const name = await entity.get(NameComponent);
-        return name?.value || "";
-    }
-}
-
-export type IUserArcheType = ArcheTypeOwnProperties<UserArcheTypeClass>;
-export const UserArcheType = new UserArcheTypeClass();
-
-// Use getInputSchema() for GraphQL mutation inputs
-// Returns a Zod schema excluding relations and functions
-const inputSchema = UserArcheType.getInputSchema();
-```
-
-## GraphQL Output Types
-
-For `@GraphQLOperation` output, use:
-- **ArcheType instance**: `output: UserArcheType` - returns the archetype GraphQL type
-- **Array of ArcheType**: `output: [UserArcheType]` - returns a list
-- **Scalar string**: `output: "Boolean"`, `output: "String"`, `output: "Int"`, `output: "Float"` - for primitive returns
-
-For `@ArcheTypeFunction` returnType, use scalar strings:
-- `returnType: "Boolean"` (NOT `z.boolean()`)
-- `returnType: "String"` (NOT `z.string()`)
-- `returnType: "Int"` (NOT `z.number()`)
-- `returnType: "Float"`
-
-## Service Definition
-
-```typescript
-class UserService extends BaseService {
-    constructor(private app: App) {
-        super();
-        UserArcheType.registerFieldResolvers(this);
-    }
-
-    // Query
-    @GraphQLOperation({
-        type: "Query",
-        output: UserArcheType,
-    })
-    async getUser(args: { id: string }, context: GraphQLContext) {
-        return await Entity.FindById(args.id);
-    }
-
-    // Mutation with ArcheType input schema (recommended for archetype-based inputs)
-    @GraphQLOperation({
-        type: "Mutation",
-        input: UserArcheType.getInputSchema(),
-        output: UserArcheType,
-    })
-    async createUser(args: IUserArcheType, context: GraphQLContext) {
-        const user = UserArcheType.fill(args).createEntity();
-        await user.save();
-        return user;
-    }
-
-    // Mutation with custom Zod schema (for custom inputs)
-    @GraphQLOperation({
-        type: "Mutation",
-        input: z.object({
-            userId: z.string(),
-            points: z.number(),
-        }),
-        output: UserArcheType,
-    })
-    async addPoints(args: { userId: string; points: number }, context: GraphQLContext) {
-        const user = await Entity.FindById(args.userId);
-        // ... update logic
-        return user;
-    }
-
-    // REST endpoint
-    @Get("/v1/users/:id")
-    async getUserRest(req: Request) {
-        return Response.json({ data: {} });
-    }
-}
-
-export default UserService;
-```
-
-## Transaction
-
-```typescript
-import db from "bunsane/database";
-
-const result = await db.transaction(async (trx) => {
-    const entity = await Entity.FindById(id, trx);
-    await entity.set(Component, data, { trx });
-    await entity.save(trx);
-    return entity;
-});
-```
-
-## Error Handling
-
-```typescript
-// GraphQL error
-return new GraphQLError("Not found", {
-    extensions: { code: "NOT_FOUND" }
-});
-
-// Using helper
-return responseError("Not found", {
-    extensions: { code: "NOT_FOUND" }
-});
-
-// Common error codes
-"NOT_FOUND"          // 404
-"UNAUTHENTICATED"    // 401
-"FORBIDDEN"          // 403
-"BAD_USER_INPUT"     // 400
-"INTERNAL_ERROR"     // 500
-```
-
-## Authentication Check
-
-> **Note:** The `jwt` property must be added to `GraphQLContext` by your application middleware. It is not built-in.
-
-```typescript
-// In GraphQL operation (jwt must be added by middleware)
-async profile(args: {}, context: GraphQLContext) {
-    if (!context.jwt?.payload?.user_id) {
-        return new GraphQLError("Authentication required", {
-            extensions: { code: "UNAUTHENTICATED" }
-        });
-    }
-    const userId = context.jwt.payload.user_id;
-    return await Entity.FindById(userId);
-}
-```
-
-## Entity Hooks
-
-```typescript
-@ComponentTargetHook("entity.created", {
-    includeComponents: [OrderTag, OrderInfoComponent],
-})
-async onOrderCreated(event: EntityCreatedEvent) {
-    const entity = event.entity;
-    // Handle creation
-}
-
-@ComponentTargetHook("entity.updated", {
-    includeComponents: [OrderTag, OrderStatusComponent],
-})
-async onOrderUpdated(event: EntityUpdatedEvent) {
-    const entity = event.entity;
-    // Handle update
-}
-```
-
-## Subscriptions
-
-```typescript
-// Define subscription
-@GraphQLSubscription({
-    output: OrderArcheType,
-})
-async orderUpdated(args: { orderId: string }, context: GraphQLContext) {
-    return this.app.pubSub.subscribe(`order.${args.orderId}`);
-}
-
-// Publish event
-this.app.pubSub.publish(`order.${orderId}`, entity);
-```
-
-## Enum Definition
-
-Define enums using the `@Enum()` decorator for GraphQL schema generation:
-
-```typescript
-import { Enum } from "bunsane/core/metadata";
-
-@Enum()
-export class OrderStatus {
-    static PENDING = "pending";
-    static PROCESSING = "processing";
-    static COMPLETED = "completed";
-    static CANCELLED = "cancelled";
-}
-
-@Enum()
-export class UserRole {
-    static ADMIN = "admin";
-    static USER = "user";
-    static DRIVER = "driver";
-}
-```
-
-### Using Enums in Zod Validation
-
-Use `Object.keys()` to convert enum class to Zod enum:
-
-```typescript
-// In GraphQL operation input
-@GraphQLOperation({
-    type: "Mutation",
-    input: z.object({
-        status: z.enum([...Object.keys(OrderStatus)] as [string, ...string[]]),
-        role: z.enum([...Object.keys(UserRole)] as [string, ...string[]]),
-    }),
-    output: OrderArcheType,
-})
-async updateOrder(args: { status: string; role: string }) {
-    // args.status will be one of: "PENDING", "PROCESSING", etc.
-}
-```
-
-### ArcheType with Custom Validation
-
-Use `ArcheType.withValidation()` for input schemas with custom field validation:
-
-```typescript
-@GraphQLOperation({
-    type: "Mutation",
-    input: UserArcheType.withValidation({
-        // Validate nested fields using dot notation
-        "info.role": z.enum([...Object.keys(UserRole)] as [string, ...string[]]),
-        "info.email": z.string().email("Invalid email format"),
-        "profile.phone": z.string().min(10, "Phone must be at least 10 characters"),
-    }),
-    output: UserArcheType,
-})
-async createUser(args: IUserArcheType) {
-    // Input is validated against both archetype schema and custom validators
-}
-```
-
-## Zod Schemas (For GraphQL Input)
-
-> **Important:** The schema generator can only infer **simple Zod types**. Complex validation chains (`.min()`, `.max()`, `.email()`) are NOT supported for GraphQL schema generation.
-
-### Supported Types for GraphQL Input
-
-```typescript
-// ✅ These work with GraphQL schema generator
-z.string()              // → GraphQL String
-z.number()              // → GraphQL Int/Float
-z.boolean()             // → GraphQL Boolean
-z.string().optional()   // → Nullable String
-z.enum([...])           // → GraphQL Enum
-
-// ✅ Simple object with scalars
-z.object({
-    id: z.string(),
-    active: z.boolean(),
-    count: z.number(),
-})
-```
-
-### NOT Supported for GraphQL Input
-
-```typescript
-// ❌ These will NOT be inferred correctly
-z.string().min(2).max(100)    // Complex validation
-z.string().email()             // Format validation
-z.string().uuid()              // Format validation
-z.string().regex(/pattern/)    // Regex validation
-z.number().min(0).max(100)     // Range validation
-z.string().transform(...)      // Transforms
-z.array(z.object({...}))       // Nested complex objects
-```
-
-### Input Schema Best Practices
-
-```typescript
-// ✅ CORRECT: Use ArcheType methods for complex inputs
-input: UserArcheType.getInputSchema()
-input: UserArcheType.withValidation({ "field": z.enum([...]) })
-
-// ✅ CORRECT: Simple scalars for non-ArcheType inputs
-input: z.object({
-    order_id: z.string(),
-    accept: z.boolean(),
-})
-
-// Then validate manually in resolver:
-if (args.email.length < 2) {
-    return new GraphQLError("Invalid input", { extensions: { code: "BAD_USER_INPUT" } });
-}
-```
-
-## Minimal App Setup
-
-A minimal BunSane application requires three files: `index.ts` (entry point), `src/App.ts` (application class), and at least one service.
-
-### 1. Entry Point (`index.ts`)
-
-```typescript
-import MyAPI from '~/App';
-
-const app = new MyAPI();
-try {
-    app.init();
-} catch (error) {
-    console.log('Process terminated with error');
-    console.error(error);
-    process.exit(1);
-}
-```
-
-### 2. Application Class (`src/App.ts`)
-
-```typescript
-import 'reflect-metadata';
-import App from 'bunsane/core/App';
-import { ServiceRegistry } from 'bunsane/service';
-
-// Import all component files to ensure decorators are executed during app initialization
-import '~/components/UserComponent';
-
-// Import services
-import UserService from '~/services/UserService';
-
-export default class MyAPI extends App {
-    constructor() {
-        super('MyAPI', '1.0.0');
-
-        // Optional: Enable Bunsane Studio in development
-        if (process.env.NODE_ENV === 'development') {
-            this.enableStudio();
-        }
-
-        // Register services
-        ServiceRegistry.registerService(new UserService(this));
-    }
-}
-```
-
-### 3. Sample Service (`src/services/UserService.ts`)
-
-```typescript
-import { BaseService } from 'bunsane/service';
-import { GraphQLOperation } from 'bunsane/gql';
-import { Entity } from 'bunsane/core/Entity';
-import App from 'bunsane/core/App';
-import { z } from 'zod';
-import { UserTag, NameComponent } from '~/components/UserComponent';
-import { UserArcheType } from '~/archetypes/UserArcheType';
-
-class UserService extends BaseService {
-    constructor(private app: App) {
-        super();
-        UserArcheType.registerFieldResolvers(this);
-    }
-
-    @GraphQLOperation({
-        type: 'Query',
-        output: UserArcheType,
-    })
-    async getUser(args: { id: string }) {
-        return await Entity.FindById(args.id);
-    }
-
-    @GraphQLOperation({
-        type: 'Mutation',
-        input: z.object({ name: z.string().min(2) }),
-        output: UserArcheType,
-    })
-    async createUser(args: { name: string }) {
-        const user = Entity.Create()
-            .add(UserTag, {})
-            .add(NameComponent, { value: args.name });
-        await user.save();
-        return user;
-    }
-}
-
-export default UserService;
-```
-
-### S3 Upload Storage
-
-```typescript
-import { initializeS3Storage } from "bunsane/upload";
-
-// In App constructor — registers "s3" storage provider
-await initializeS3Storage({
-    bucket: "my-app-uploads",
-    region: "us-east-1",
-    keyPrefix: "uploads/",
-});
-```
-
-### REST File Upload
-
-```typescript
-import { handleUpload, uploadResponse, uploadErrorResponse } from "bunsane/upload";
-
-@Post("/api/upload")
-async upload(req: Request) {
-    try {
-        const result = await handleUpload(req, {
-            config: { maxFileSize: 5_000_000, allowedMimeTypes: ["image/jpeg", "image/png"] },
-            maxFiles: 3,
-            storageProvider: "s3", // optional, defaults to "local"
-        });
-        return uploadResponse(result);
-    } catch (error) {
-        return uploadErrorResponse(error);
-    }
-}
-```
-
-### Key Points
-
-1. **`reflect-metadata` import** - Must be at the top of `App.ts` for decorators to work
-2. **Component imports** - Import all component files in `App.ts` to trigger decorator registration
-3. **Path alias** - Use `~/` (configured in tsconfig.json) to reference `src/` directory
-4. **Service registration** - Register all services in the constructor using `ServiceRegistry.registerService()`
-5. **Field resolvers** - Call `ArcheType.registerFieldResolvers(this)` in service constructor for computed fields
-
-### Optional Configuration
-
-```typescript
-export default class MyAPI extends App {
-    constructor() {
-        super('MyAPI', '1.0.0');
-
-        // Enable/disable scheduler logging
-        this.config.scheduler.logging = process.env.LOGGING_SCHEDULER === 'true';
-
-        // Enable OpenAPI/Swagger documentation
-        this.enforceSwaggerDocs(true);
-        this.addOpenAPIServer('https://api.example.com', 'Production Server');
-
-        // Add static file serving
-        this.addStaticAssets('/uploads', './public/uploads');
-
-        // Add custom plugins
-        this.addPlugin(new MyCustomPlugin());
-
-        // Add GraphQL Yoga plugins (e.g., JWT authentication)
-        this.addYogaPlugin(jwtPlugin);
-
-        // Custom GraphQL context factory
-        this.setGraphQLContextFactory((context: any) => {
-            return { loaders: createRequestLoaders() };
-        });
-
-        // Enable Bunsane Studio (development only)
-        if (process.env.NODE_ENV === 'development') {
-            this.enableStudio();
-        }
-
-        // Register services
-        ServiceRegistry.registerService(new UserService(this));
-    }
-}
-```
-
-### Required Dependencies
-
-```json
-{
-  "dependencies": {
-    "bunsane": "latest",
-    "reflect-metadata": "^0.2.0",
-    "zod": "^3.x"
-  }
-}
-```
-
-### tsconfig.json Path Alias
+## tsconfig
 
 ```json
 {
   "compilerOptions": {
-    "paths": {
-      "~/*": ["./src/*"]
-    }
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "strict": true
   }
 }
 ```
 
-## File Structure
+`emitDecoratorMetadata` is what makes a `number` field a numeric key (`bunsane_num_v1`). A `Date` is always a text key (`data->>'field'`). There is no date key. Bun `>= 1.1.0`.
 
-```
-src/
-├── components/
-│   └── UserComponent.ts
-├── archetypes/
-│   └── UserArcheType.ts
-├── services/
-│   └── UserService.ts
-├── utilities/
-│   └── helpers.ts
-└── App.ts
-```
+## Decorators
 
-## Naming Conventions
+| Decorator | On | Effect |
+|-----------|----|--------|
+| `@Component` | class | Registers the component. No options. |
+| `@CompData({ indexed?, nullable?, arrayOf? })` | field | JSON key. `indexed: true` on a scalar → `bk_` key index (0.9, unreleased). On `arrayOf` → GIN. |
+| `@CompositeIndex(["a", "b"])` | class | `(a, b, entity_id)`. Equality on leading fields, sort on the next. Root export. |
+| `@IndexedField("gin" \| "btree" \| "hash" \| "numeric" \| "fulltext")` | field | Default is `"gin"`, not a sort key. Deep import. |
+| `@ArcheType("Name")` | class | GraphQL type. Name optional. |
+| `@ArcheTypeField(Ctor, { nullable? })` | field | Component on the type. |
+| `@ArcheTypeFunction({ returnType, batch? })` | method | Scalars: `"string"` `"number"` `"boolean"` `"Date"`. Not `"String"` / `"Float"`. |
+| `@HasMany` `@HasOne` `@BelongsTo` `@BelongsToMany` | field | `foreignKey: "component.prop"` unless exactly one `user_id` or `parent_id` matches. |
+| `@GraphQLOperation({ type, input, output })` | method | `type` is `"Query"` or `"Mutation"`. |
+| `@GraphQLSubscription` | method | Same input inference. |
+| `@ScheduledTask({ interval, maxEntitiesPerExecution? })` | method | No cap → 1000 entities. |
+| `@Get` `@Post` … | method | `bunsane/service`. |
+| `@ReadModel` `@Project` | class / field | `bunsane/core/readmodel`. Tables are `m3_*`. |
+| `@Upload` | method parameter | `bunsane/upload`. Not an archetype field. |
 
-| Type | Pattern | Example |
-|------|---------|---------|
-| Data Component | `{Name}Component` | `EmailComponent` |
-| Tag | `{Name}Tag` | `UserTag`, `DeletedTag` |
-| Archetype Class | `{Name}ArcheTypeClass` | `UserArcheTypeClass` |
-| Archetype Instance | `{Name}ArcheType` | `UserArcheType` |
-| Archetype Type | `I{Name}ArcheType` | `IUserArcheType` |
-| Service | `{Domain}Service` | `UserService` |
+Do not call `registerFieldResolvers`. Schema build attaches resolvers.
 
-## Common Gotchas
+## Entity
 
 ```typescript
-// Always save after modifications
-await entity.set(Component, data);
-await entity.save();  // Don't forget!
+const entity = Entity.Create()
+  .add(NameComponent, { value: "Ada" });
+await entity.save();
 
-// Pass trx to all operations in transaction
-await db.transaction(async (trx) => {
-    const e = await Entity.FindById(id, trx);
-    await e.set(Comp, data, { trx });
-    await e.save(trx);
-});
+const found = await Entity.FindById(id);          // null if missing
+const name = await entity.get(NameComponent);     // null if absent; throws ComponentLoadError on DB failure
+await entity.set(NameComponent, { value: "Grace" });
+entity.remove(NameComponent);                     // true even if not loaded; save() deletes the row
+await entity.save();
+await entity.delete();
 
-// Register field resolvers in constructor
-constructor(private app: App) {
-    super();
-    MyArcheType.registerFieldResolvers(this);  // Required for computed fields
+await Entity.saveMany([entity]);
+const present = await entity.hasPersisted(NameComponent);
+```
+
+`get()` returns a snapshot. Mutating it does nothing. `has()` is memory-only.
+
+## Query chain
+
+```typescript
+const q = new Query()
+  .with(UserTag)
+  .with(ProfileComponent, Query.filters(
+    Query.filter("city", FilterOp.EQ, "Paris"),
+    Query.filter("score", FilterOp.GTE, 10),
+  ))
+  .without(SoftDeletedTag)          // never QSP
+  .sortBy(ProfileComponent, "score", "DESC")
+  .eagerLoadComponents([ProfileComponent])
+  .populate()                       // use the return value for the loaded type
+  .take(20);                        // not .limit()
+
+const rows = await q.exec();
+q.getLastRouteInfo();
+// { routed, surface: "rm" | "legacy", hasNextPage?, truncatedByDefaultLimit?, entitySortPlan? }
+
+await q.count();                    // ignores take/offset
+```
+
+`or([...])` as `.with(or([...]))`. Cannot combine with `groupBy`.
+
+Scalar totals (component must be in `.with()`; no `.groupBy()`):
+
+```typescript
+await new Query().with(OrderAmountComponent).sum(OrderAmountComponent, "amount");
+await new Query().with(OrderAmountComponent).average(OrderAmountComponent, "amount");
+// Promise<number>, 0 if nothing matches
+```
+
+Grouped aggregates (throw if you skip `.groupBy()`):
+
+```typescript
+await new Query()
+  .with(OrderInfoComponent)
+  .with(OrderAmountComponent)
+  .groupBy(OrderInfoComponent, "customerId")
+  .sumBy(OrderAmountComponent, "amount");
+// also countBy(), maxBy(Ctor, field, { cast: "numeric" }), minBy(), avgIntervalMinutesBy(Ctor, start, end)
+```
+
+
+Cross-entity: `ReadModel(InvoiceReport).where("status", "paid").orderBy("total", "DESC").limit(20).listPage()`. `.rows()` / `.listPage()` throw if limit or offset is set without `.orderBy()` (0.8+).
+
+## FilterOp
+
+`FilterOp` and `Query.filterOp` are the same object.
+
+| Name | SQL |
+|------|-----|
+| `EQ` `NEQ` | `=` `!=` |
+| `GT` `GTE` `LT` `LTE` | `>` `>=` `<` `<=` |
+| `LIKE` `ILIKE` | pattern. Leading `%` does not seek a key index. `ILIKE` is not a QSP op. |
+| `IN` `NOT_IN` | empty `IN` → `FALSE`, empty `NOT_IN` → `TRUE` |
+| `IS_NULL` `IS_NOT_NULL` | missing key, JSON `null`, or `''` |
+| `CONTAINS` `CONTAINED_BY` `HAS_ANY` `HAS_ALL` | JSON array. GIN, not a key index. Not QSP. |
+
+Booleans compare to the text `'true'`. Numeric compares use `bunsane_num_v1`. Non-numeric text is NULL (0.9, unreleased).
+
+## Pagination
+
+```typescript
+const token = Query.encodeSortedCursor(value, entityId);          // one key
+const multi = Query.encodeSortedCursor([status, total], entityId); // width must match sortBy count
+
+await new Query()
+  .with(ProfileComponent)
+  .sortBy(ProfileComponent, "createdAt", "DESC")
+  .take(20)
+  .sortedCursor(token, "before") // or "after" (default)
+  .exec();
+```
+
+Throws:
+
+- `.sortedCursor()` with no sort
+- token width ≠ sort-key count
+- `.cursor(id)` combined with `sortBy`, `sortByCreatedAt`, or `sortByUpdatedAt`
+
+Legacy `.take(N)` sets `hasNextPage`. The default limit does not, unless the exec was QSP-routed (`surface: 'rm'`), which sets it whenever a limit is applied. Tie-break follows the sort direction (0.9, unreleased): DESC ties use `entity_id DESC`.
+
+`sortByCreatedAt().with(X)` when X is clustered in time is not index-driven. Use QSP for that list.
+
+Unbounded `exec()` that fills `BUNSANE_DEFAULT_QUERY_LIMIT` (10000) throws in `NODE_ENV=development`.
+
+## `t.*` inputs
+
+Top-level `input` is a record of builders, not `t.object()`.
+
+```typescript
+const input = {
+  id: t.id().required(),
+  name: t.string().minLength(2).maxLength(100).required(),
+  email: t.string().email().required(),
+  role: t.enum(["admin", "user"], "UserRole").required(),
+  tags: t.list(t.string()),
+  address: t.object({ city: t.string().required() }, "AddressInput"),
+};
+
+@GraphQLOperation({ type: "Mutation", input, output: "User" })
+async createUser(args: InferInput<typeof input>): Promise<unknown> | unknown {
+  return Entity.FindById(args.id);
+}
+```
+
+Optional until `.required()`. No `t.date()` — pass `t.string()` and parse ISO. Zod and `{ field: "String!" }` inputs still run and warn. Names must be GraphQL identifiers.
+
+`output`: archetype class or instance, an array of those, a type name (`"User"`, `"Boolean"`, `"String"`, `"Int"`, `"Float"`), or a field map (`{ nodes: "[User!]!", hasNextPage: "Boolean!" }`). Anything else throws at schema build.
+
+## Minimal app
+
+```typescript
+import "reflect-metadata";
+import { App, BaseService, Entity, GraphQLOperation, ServiceRegistry, t, type InferInput } from "bunsane";
+
+const pingInput = { name: t.string().required() };
+
+class PingService extends BaseService {
+  @GraphQLOperation({ type: "Query", input: pingInput, output: "String" })
+  ping(input: InferInput<typeof pingInput>): Promise<unknown> | unknown {
+    return `hello ${input.name}`;
+  }
 }
 
-// Import components in App.ts
-import "./components/MyComponent";  // Triggers decorators
+const app = new App("MyAPI", "1.0.0");
+app.setCors({ origin: "https://app.example.com" });
+ServiceRegistry.registerService(new PingService());
+await app.init();
 ```
+
+`init()` migrates and listens unless `NODE_ENV=test`. GraphQL is `/graphql`. Liveness is `/health` (write probe).
+
+## Security defaults
+
+| Default | What you do |
+|---------|-------------|
+| CORS `origin` required | `setCors({ origin })`. `credentials: true` + `"*"` throws. |
+| JSON body 1 MB | 413 over `Content-Length`. `setJsonBodyLimit` / `JSON_BODY_LIMIT`. |
+| Multipart 50 MB, 411 without `Content-Length` | Browsers send it. In-process `FormData` requests must set it. |
+| Depth 15, complexity 1000 | Floors. `0` does not disable. |
+| Introspection and GraphiQL off | On in `NODE_ENV=development`, or `GRAPHQL_INTROSPECTION=on` / `GRAPHQL_GRAPHIQL=on`. |
+| `/metrics`, `/health/remote`, `/docs`, `/openapi.json` | No token and not `=public` → 404. Token set, header missing or wrong → 401. |
+| HSTS off | `BUNSANE_HSTS=on` or `BUNSANE_TLS=on`. Not implied by `NODE_ENV=production`. |
+| `requestId` + `securityHeaders` on | `setRequestId(false)` / `setSecurityHeaders(false)` before start. |
+
+`enableStudio()` without a ≥ 16 character token refuses. `app.use()` after `start()` throws.
+
+## Env vars most apps set
+
+Full list: [Configuration](../configuration.md).
+
+| Variable | Why |
+|----------|-----|
+| `DB_CONNECTION_URL` or `POSTGRES_HOST` + `POSTGRES_USER` + `POSTGRES_DB` | Required to boot. |
+| `APP_PORT` | Default 3000. |
+| `NODE_ENV` | `development` throws on unbounded `exec()`, enables GraphiQL. |
+| `DB_DISABLE_PREPARE=true` | Required behind PgBouncer transaction pooling. Do not set it for the test suite. |
+| `DB_REQUEST_TIMEOUT` | Request-lane deadline in ms. Unset inherits `DB_QUERY_TIMEOUT` (30000). Set a few seconds if you want shedding. |
+| `BUNSANE_CACHE_INVALIDATION_SECRET` | Required on every instance or cross-instance L1 invalidation stays off. |
+| `BUNSANE_QSP` | `off` (default), `shadow`, or `route`. |
+| `GRAPHQL_INTROSPECTION` / `GRAPHQL_GRAPHIQL` | `on` / `off`. Otherwise follow `NODE_ENV`. |
+| `BUNSANE_METRICS_TOKEN` / `BUNSANE_DOCS_TOKEN` | Open `/metrics` and `/docs`. Or `=public`. |
+| `JSON_BODY_LIMIT` / `MULTIPART_BODY_LIMIT` | Defaults 1 MB / 50 MB. |
+| `BUNSANE_HSTS` / `BUNSANE_TLS` | `on` to send HSTS. |
+| `REDIS_TLS` | `true` opens TLS (0.8+). |
+| `BUNSANE_DEFAULT_QUERY_LIMIT` | Default 10000. `0` disables. |
+| `BUNSANE_INDEX_SYNC_MAX_ROWS` | Default 100000. Larger tables build `bk_` indexes in the background (0.9, unreleased). |
+| `BUNSANE_ENTITY_SORT_PROBE` | Default 5000. Cap for `sortByCreatedAt().with(X)` (0.9, unreleased). |
+
+Invalid `BUNSANE_INDEX_SYNC_MAX_ROWS` or `BUNSANE_ENTITY_SORT_PROBE` fails `init()`.
+
+## Gotchas
+
+```typescript
+import { dbTransaction } from "bunsane/database/gateway";
+
+await entity.set(NameComponent, data);
+await entity.save(); // set() does not persist
+
+await dbTransaction(async (trx) => {
+  const row = await Entity.FindById(id, trx);
+  await row?.save(trx);
+});
+
+const token = Query.encodeSortedCursor(value, entity.id);
+await q.sortBy(ProfileComponent, "score", "DESC").sortedCursor(token, "before").exec();
+```
+
+The default `db` export is a lazy proxy. `import { getDb } from "bunsane/database"` when you need the SQL instance.
+
+
+- `@HasOne` is nullable unless `nullable: false`.
+- Entity hooks, sync or `async: true`, run after `save()` commits (microtask). `save()` does not wait. `set()` does await `component.updated`.
+- Negative component cache defaults to on. A tombstone is absence, not a DB error.
+- `REDIS_TLS=true` is real TLS.
+- Second `start()` does not rebind.

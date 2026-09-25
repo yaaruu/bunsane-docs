@@ -9,12 +9,10 @@ The scheduler runs recurring tasks that operate on entities. Define tasks with t
 
 ## Defining Scheduled Tasks
 
-Import `ScheduledTask` and `ScheduleInterval` from `bunsane/scheduler`:
+Import `ScheduledTask`, `ScheduleInterval`, and `registerScheduledTasks` from `"bunsane"`:
 
 ```typescript
-import { ScheduledTask, ScheduleInterval } from "bunsane/scheduler";
-import { BaseService } from "bunsane/service";
-import { Query } from "bunsane/query";
+import { BaseService, Query, ScheduleInterval, ScheduledTask } from "bunsane";
 
 class SessionService extends BaseService {
     @ScheduledTask({
@@ -29,32 +27,10 @@ class SessionService extends BaseService {
 }
 ```
 
-The decorator stores metadata on the class. Actual registration happens at app boot when `registerScheduledTasks(service)` is called for all registered services. The task ID is auto-generated as `ClassName.methodName` unless you provide one.
+The decorator stores metadata on the class. At `SYSTEM_READY`, boot calls `registerScheduledTasks` for every registered service. You may also call it yourself; registration is deduped by task id. The task id is `ClassName.methodName` unless you set `id`.
 
-### Registering Tasks with Your Service
+You do not have to call `registerScheduledTasks` in the constructor. Boot does it after services are registered. Call it yourself only if you register a service after boot.
 
-Call `registerScheduledTasks` in your service constructor after calling `super()`:
-
-```typescript
-import { registerScheduledTasks } from "bunsane/scheduler";
-
-class SessionService extends BaseService {
-    constructor(private app: App) {
-        super();
-        registerScheduledTasks(this);
-    }
-
-    @ScheduledTask({
-        interval: ScheduleInterval.HOUR,
-        query: () => new Query().with(SessionComponent).without(AuthenticatedTag),
-    })
-    async cleanExpiredSessions(entities: Entity[]) {
-        for (const entity of entities) {
-            await entity.delete();
-        }
-    }
-}
-```
 
 ## Schedule Intervals
 
@@ -112,7 +88,7 @@ async monthlyBilling(entities: Entity[]) { ... }
 | `maxRetries` | `number` | `0` | Retry attempts on failure |
 | `retryDelay` | `number` | `1000` | ms between retries |
 | `continueOnError` | `boolean` | `false` | Keep running after unhandled errors |
-| `maxEntitiesPerExecution` | `number` | -- | Cap query results per tick |
+| `maxEntitiesPerExecution` | `number` | `1000` when the query has no smaller `.take()` | Cap rows loaded per tick (0.7+) |
 | `enableMetrics` | `boolean` | -- | Enable per-task metrics collection |
 | `enableLogging` | `boolean` | -- | Verbose per-task logging |
 
@@ -134,7 +110,7 @@ The `query` function gives you full access to the Query API:
 async processOpenOrders(entities: Entity[]) { ... }
 ```
 
-Prefer `.take()` inside your query function rather than `maxEntitiesPerExecution` -- it limits results at the database level rather than after fetching.
+A query with no `maxEntitiesPerExecution` and no smaller `.take()` is capped at **1000** entities (0.7+). If a run returns that many rows, the scheduler warns once per task. Set `maxEntitiesPerExecution`, or `.take()` inside the query, when 1000 is not the limit you want. `.take()` smaller than 1000 is left alone.
 
 ### componentTarget (deprecated)
 
@@ -167,26 +143,20 @@ async sendInvoices(entities: Entity[]) { ... }
 
 ## Distributed Locking
 
-In multi-instance deployments, the scheduler uses PostgreSQL advisory locks to ensure only one instance executes a given task at a time. When a second instance attempts the same task while the lock is held, it emits `task.skipped` and moves on -- it does not queue or block.
+The default backend is a PostgreSQL **lease** (`BUNSANE_LOCK_BACKEND=auto` selects postgres). It is one short transaction per acquire, renew, and release, so it works behind PgBouncer transaction pooling. Advisory locks are opt-in. They need a session-pinned connection and are not the default.
 
-Lock keys are a deterministic hash of the task ID, namespaced to BunSane. Locks are session-scoped and are released automatically if the database connection drops.
+The lease is renewed about every TTL/3 (minimum 1 second) while the task runs. TTL is at least the task timeout plus 5 seconds. A wrapper timeout does not release the lease until the task function settles. If renewal fails, the lease was lost and the critical section is no longer protected.
 
-Configure locking via `SchedulerManager.updateConfig()`:
+When a second instance cannot take the lock, the scheduler emits `task.skipped` and moves on. It does not queue.
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `distributedLocking` | `boolean` | `true` | Enable advisory locks |
-| `lockTimeout` | `number` | `0` | Lock wait time in ms (`0` = skip immediately) |
-| `lockRetryInterval` | `number` | `100` | ms between lock retry attempts |
-
-Setting `lockTimeout` to a value greater than `0` causes the scheduler to retry acquiring the lock until the timeout elapses before giving up.
+See [Configuration](./configuration.md) for `BUNSANE_LOCK_BACKEND`.
 
 ## Manual Locking (`withLock`)
 
-The same advisory lock the scheduler uses for task exclusion is exposed as a standalone primitive. Use `withLock` to give any block of code the same cross-instance, run-once guarantee — a manual reindex, a one-off migration, or a cache rebuild that must not run on two pods at once.
+`withLock` is on the root barrel. It uses the same lease backend as the scheduler.
 
 ```typescript
-import { withLock } from "bunsane/core";
+import { withLock } from "bunsane";
 
 const res = await withLock("rebuild-search-index", async () => {
     await rebuildIndex();
@@ -194,38 +164,23 @@ const res = await withLock("rebuild-search-index", async () => {
 });
 
 if (!res.acquired) {
-    // Another instance holds the lock — skip.
+    // Another holder has the lock.
 } else {
-    console.log(res.result); // "done"
+    console.log(res.result);
 }
 ```
 
-`withLock(key, fn, options?)` acquires a PostgreSQL advisory lock for `key`, runs `fn`, and always releases the lock afterward — even if `fn` throws. Only one holder of a given `key` runs `fn` at a time across every process pointed at the same database. When the lock is unavailable it returns `{ acquired: false }` without running `fn`.
+`withLock(key, fn, options?)` acquires the lock, runs `fn`, renews the lease about every TTL/3, and releases afterward — including when `fn` throws. Contention returns `{ acquired: false }` unless `throwOnContention` is set, in which case it throws `LockUnavailableError` (also on the root barrel).
 
-It returns a `LockOutcome<T>`:
+| Option | Default | Description |
+|---|---|---|
+| `wait` | `0` | Max ms to wait. `0` tries once |
+| `retryInterval` | `100` | Ms between attempts |
+| `throwOnContention` | `false` | Throw `LockUnavailableError` instead of `{ acquired: false }` |
+| `onContended` | — | Called before the contention return or throw |
+| `leaseTtlMs` | backend default (30000) | Lease lifetime. Heartbeat is about TTL/3, at least 1 second |
 
-- `{ acquired: true, result }` — the lock was taken and `fn` ran; `result` is its return value.
-- `{ acquired: false }` — the lock was held elsewhere (and `wait` elapsed, if set); `fn` did not run.
-
-### Options
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `wait` | `number` | `0` | Max ms to wait for the lock before giving up. `0` tries once. |
-| `retryInterval` | `number` | `100` | ms between attempts while waiting. |
-
-```typescript
-// Wait up to 5s for the lock, polling every 200ms.
-const res = await withLock("nightly-rollup", runRollup, { wait: 5000, retryInterval: 200 });
-```
-
-### Notes
-
-- **Shares the scheduler's lock session.** `withLock` and `@ScheduledTask` locks live in the same PostgreSQL session and namespace. Pick keys unlikely to collide with task IDs (`Class.method`).
-- **Not reentrant.** Calling `withLock` for a key already held by the current process returns `{ acquired: false }` (or waits, then gives up). Do not nest the same key.
-- **Crash-safe.** Locks are session-scoped; if the process dies, PostgreSQL releases them automatically.
-- **Honors scheduler config.** If distributed locking was disabled (`distributedLocking: false`), `withLock` always reports `acquired: true` and takes no real lock.
-- Unlike `pg_advisory_xact_lock`, this lock is **not** tied to a transaction — it is held only for the duration of `fn`. For a lock that auto-releases at transaction commit/rollback, use a transaction-scoped advisory lock inside `db.transaction()` instead.
+Same-process re-entry of a key this call already holds returns `{ acquired: false }` (or waits, then gives up). Do not nest the same key. If scheduler distributed locking is disabled, acquire reports success and takes no database lock.
 
 ## Scheduler Configuration
 
@@ -249,7 +204,7 @@ SchedulerManager.getInstance().updateConfig({
 | `defaultTimeout` | `number` | `30000` | Default task timeout in ms |
 | `enableLogging` | `boolean` | `false` | Verbose scheduler logging |
 | `runOnStart` | `boolean` | `true` | Auto-start when the app reaches ready state |
-| `distributedLocking` | `boolean` | `true` | Enable PostgreSQL advisory locks |
+| `distributedLocking` | `boolean` | `true` | Enable distributed locks. Default backend is a PostgreSQL lease, not advisory locks |
 | `lockTimeout` | `number` | `0` | Lock wait time in ms |
 | `lockRetryInterval` | `number` | `100` | ms between lock retries |
 
@@ -307,10 +262,9 @@ Available event types:
 | `task.failed` | Task threw an error (after all retries) |
 | `task.timeout` | Task exceeded its timeout |
 | `task.retry` | Task is being retried |
-| `task.skipped` | Task skipped (concurrency limit or lock unavailable) |
+| `task.skipped` | Task skipped (concurrency limit or lock unavailable). `task.lock.failed` is in the type union and is never emitted |
 | `task.lock.acquired` | Distributed lock acquired |
 | `task.lock.released` | Distributed lock released |
-| `task.lock.failed` | Failed to acquire distributed lock |
 | `scheduler.started` | Scheduler started |
 | `scheduler.stopped` | Scheduler stopped |
 
@@ -341,16 +295,13 @@ Scheduler metrics are included in the `/metrics` HTTP endpoint response alongsid
 ## Example: Full Service
 
 ```typescript
-import { BaseService } from "bunsane/service";
-import { ScheduledTask, ScheduleInterval, registerScheduledTasks } from "bunsane/scheduler";
+import { App, BaseService, Query, ScheduleInterval, ScheduledTask } from "bunsane";
 import { SchedulerManager } from "bunsane/core/SchedulerManager";
-import { Query } from "bunsane/query";
-import App from "bunsane/core/App";
 
 class MaintenanceService extends BaseService {
     constructor(private app: App) {
         super();
-        registerScheduledTasks(this);
+
         this.registerCacheWarmJob();
     }
 
@@ -372,7 +323,7 @@ class MaintenanceService extends BaseService {
     @ScheduledTask({
         interval: ScheduleInterval.CRON,
         cronExpression: "0 1 * * *",
-        query: () => new Query().with(UserComponent).with(ActivityComponent).take(10_000),
+        query: () => new Query().with(UserComponent).with(ActivityComponent).take(500),
         timeout: 120_000,
         priority: 10,
     })
@@ -390,7 +341,7 @@ class MaintenanceService extends BaseService {
         const scheduler = SchedulerManager.getInstance();
 
         scheduler.scheduleJob("cache-warm", "0 */6 * * *", async () => {
-            await this.app.cache.warm(["featured-products", "top-categories"]);
+            await this.warmFeaturedLists();
         });
     }
 }

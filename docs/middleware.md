@@ -6,26 +6,38 @@ sidebar_position: 7
 
 BunSane includes a middleware system for processing HTTP requests before they reach your routes. Middleware can add headers, log requests, inject request IDs, and more.
 
-## Using Middleware
+## Defaults
 
-Register middleware with `app.use()` in your App class:
+`start()` installs `requestId`, then `securityHeaders`, then any middleware you registered with `use()` (0.7+). You do not add those two yourself unless you opted out.
 
 ```typescript
-import App from "bunsane/core/App";
-import { requestId, accessLog, securityHeaders } from "bunsane/core/middleware";
+import { App } from "bunsane";
 
 export default class MyAPI extends App {
     constructor() {
         super("MyAPI", "1.0.0");
-
-        this.use(requestId());
-        this.use(accessLog({ skip: ["/health"] }));
-        this.use(securityHeaders());
+        this.setRequestId(false);          // opt out before start()
+        this.setSecurityHeaders(false);    // opt out before start()
     }
 }
 ```
 
-Middleware executes in the order you register it. Each middleware wraps the next, forming an onion-style chain -- the first middleware registered is the outermost layer.
+Call `use()` before `start()`. After `start()` it throws: middleware is composed when the server starts. A second `start()` is a no-op.
+
+## Using Middleware
+
+```typescript
+import { App, accessLog, rateLimit } from "bunsane";
+
+export default class MyAPI extends App {
+    constructor() {
+        super("MyAPI", "1.0.0");
+        this.use(accessLog({ skip: ["/health"] }));
+        this.use(rateLimit({ max: 100, windowMs: 60_000 }));
+    }
+}
+```
+
 
 ## Built-in Middleware
 
@@ -34,7 +46,7 @@ Middleware executes in the order you register it. Each middleware wraps the next
 Generates a unique ID for every request and makes it available throughout your code. If the incoming request already has an `X-Request-Id` header (from a load balancer or proxy), that ID is reused.
 
 ```typescript
-import { requestId } from "bunsane/core/middleware";
+import { requestId } from "bunsane";
 
 this.use(requestId());
 ```
@@ -42,7 +54,7 @@ this.use(requestId());
 The request ID is added to the `X-Request-Id` response header. To access it from anywhere in your code during a request:
 
 ```typescript
-import { getRequestId } from "bunsane/core/middleware";
+import { getRequestId } from "bunsane";
 
 const id = getRequestId(); // Returns the current request's ID, or undefined outside a request
 ```
@@ -54,7 +66,7 @@ This uses `AsyncLocalStorage` internally, so it works in any function called dur
 Logs every HTTP request with method, path, status code, and duration. It uses the built-in structured logger and includes the request ID for correlation.
 
 ```typescript
-import { accessLog } from "bunsane/core/middleware";
+import { accessLog } from "bunsane";
 
 this.use(accessLog());
 
@@ -78,7 +90,7 @@ Log levels are based on the response status code:
 Adds common security headers to all responses.
 
 ```typescript
-import { securityHeaders } from "bunsane/core/middleware";
+import { securityHeaders } from "bunsane";
 
 this.use(securityHeaders());
 ```
@@ -90,19 +102,40 @@ Default headers added:
 | `X-Frame-Options` | `DENY` | Prevents clickjacking |
 | `X-Content-Type-Options` | `nosniff` | Prevents MIME type sniffing |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` | Controls referrer information |
-| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | HSTS, production only by default |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | Off unless `BUNSANE_HSTS=on` or `BUNSANE_TLS=on`. `NODE_ENV=production` does not enable it |
 
 #### Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `hsts` | `boolean` | `true` in production | Enable HSTS header |
+| `hsts` | `boolean` | on only when `BUNSANE_HSTS=on` or `BUNSANE_TLS=on` | Enable HSTS |
 | `hstsMaxAge` | `number` | `31536000` (1 year) | HSTS max-age in seconds |
 | `frameOptions` | `'DENY'` \| `'SAMEORIGIN'` \| `false` | `'DENY'` | X-Frame-Options value |
 | `noSniff` | `boolean` | `true` | Enable X-Content-Type-Options: nosniff |
 | `referrerPolicy` | `string` \| `false` | `'strict-origin-when-cross-origin'` | Referrer-Policy value |
 | `xssProtection` | `boolean` | `false` | Enable X-XSS-Protection (deprecated in modern browsers) |
 
+### rateLimit
+
+In-memory limiter, per process. It is on the root barrel.
+
+```typescript
+import { rateLimit } from "bunsane";
+
+this.use(rateLimit({ max: 100, windowMs: 60_000, pathPrefixes: ["/v1/"] }));
+```
+
+The bucket key is the socket IP (`server.requestIP`). `X-Forwarded-For` and `X-Real-Ip` are ignored unless `trustProxy: true` (0.8+). With `trustProxy` off and no socket IP, the limiter fails open and warns once. It does not share one bucket across those requests.
+
+This store is not shared across instances. Use your own limiter if you run more than one process.
+
+| Option | Default | Description |
+|---|---|---|
+| `max` | `100` | Requests allowed in the window |
+| `windowMs` | `60000` | Window length |
+| `trustProxy` | `false` | Honour `X-Forwarded-For` / `X-Real-Ip` |
+| `pathPrefixes` | all paths | Only limit matching prefixes |
+| `status` | `429` | Rejection status |
 ## Writing Custom Middleware
 
 A middleware is a function that receives the request and a `next` function. Call `next()` to pass the request to the next middleware (and eventually your route handler).
@@ -209,8 +242,8 @@ Call `next()` to continue the chain. Return its result (or a transformed version
 Place `@Middleware` above `@GraphQLOperation` on any service method:
 
 ```typescript
-import { Middleware, type OperationMiddleware } from "bunsane/gql";
-import { GraphQLOperation } from "bunsane/gql";
+import { t } from "bunsane";
+import { GraphQLOperation, Middleware, type OperationMiddleware } from "bunsane/gql";
 import { GraphQLError } from "graphql";
 
 const Authenticate: OperationMiddleware = async (args, ctx, info, next) => {
@@ -224,7 +257,7 @@ const Authenticate: OperationMiddleware = async (args, ctx, info, next) => {
 
 class UserService extends BaseService {
     @Middleware([Authenticate])
-    @GraphQLOperation({ type: "Query", output: "User", input: { id: "ID!" } })
+    @GraphQLOperation({ type: "Query", output: "User", input: { id: t.id().required() } })
     async getUser(args, context, info) {
         return db.users.findById(args.id);
     }
@@ -261,7 +294,7 @@ Any middleware can short-circuit by throwing a `GraphQLError` rather than callin
 **Step 1 -- enrich the context** using `app.setGraphQLContextFactory()` in your App class. The factory receives the raw Yoga context (which includes the `Request`) and returns whatever you want available in `context` inside every resolver:
 
 ```typescript
-import App from "bunsane/core/App";
+import { App } from "bunsane";
 import { verifyToken } from "./auth";
 
 export default class MyAPI extends App {
@@ -310,18 +343,18 @@ export function Authorize(...permissions: string[]): OperationMiddleware {
 **Step 3 -- apply them to operations:**
 
 ```typescript
-import { Middleware, GraphQLOperation } from "bunsane/gql";
+import { t } from "bunsane";
 import { Authenticate, Authorize } from "./guards";
 
 class UserService extends BaseService {
     @Middleware([Authenticate, Authorize("users.read")])
-    @GraphQLOperation({ type: "Query", output: "User", input: { id: "ID!" } })
+    @GraphQLOperation({ type: "Query", output: "User", input: { id: t.id().required() } })
     async getUser(args, context, info) {
         return db.users.findById(args.id);
     }
 
     @Middleware([Authenticate, Authorize("users.write")])
-    @GraphQLOperation({ type: "Mutation", output: "User", input: { name: "String!" } })
+    @GraphQLOperation({ type: "Mutation", output: "User", input: { name: t.string().required() } })
     async createUser(args, context, info) {
         return db.users.create(args);
     }
@@ -329,7 +362,7 @@ class UserService extends BaseService {
 ```
 
 :::tip
-The framework's `maskError` function in `gql/index.ts` automatically maps `UNAUTHENTICATED` errors to HTTP 401 and `FORBIDDEN` errors to HTTP 403. You do not need to set `http.status` on the `GraphQLError` extensions -- throwing with the right `code` is sufficient.
+`maskError` rewrites `Unauthenticated`, `UNAUTHENTICATED`, and HTTP 401 errors to `UNAUTHORIZED` with `http: { status: 401 }`. `FORBIDDEN` is passed through unchanged and does not set an HTTP status, so the response stays 200 with the error in `errors[]`. Set `extensions.http.status` yourself if you need 403.
 :::
 
 ### Transforming Results
@@ -363,6 +396,6 @@ const withNullCoerce: OperationMiddleware = async (args, ctx, info, next) => {
 | **Registration** | `app.use(fn)` | `@Middleware([...])` decorator |
 | **Short-circuit** | Return a `Response` early | Throw a `GraphQLError` |
 | **Use cases** | Request IDs, logging, security headers, CORS | Auth, rate limiting, field-level auditing |
-| **Import from** | `bunsane/core/middleware` | `bunsane/gql` |
+| **Import from** | `"bunsane"` (HTTP helpers) | `"bunsane/gql"` |
 
 Use HTTP middleware for concerns that apply across all requests (including non-GraphQL routes such as `/health` or webhook endpoints). Use operation middleware for logic that is specific to individual GraphQL operations and needs access to the parsed arguments or user context.

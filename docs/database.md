@@ -4,91 +4,152 @@ sidebar_position: 4
 
 # Database
 
-BunSane uses PostgreSQL for all data storage. It manages database tables, indexes, and migrations automatically -- you rarely need to write SQL yourself.
+BunSane stores entities and components in PostgreSQL. `App.init()` creates the tables and indexes below. You do not write migrations for those objects.
+
+This page describes `main`. Key indexes are (0.9, unreleased). npm `latest` is still 0.6.1. See [Upgrading](./upgrading.md).
 
 ## Connection
 
-Set the `DB_CONNECTION_URL` environment variable to connect to your PostgreSQL database:
+Set `DB_CONNECTION_URL`, or `POSTGRES_HOST` + `POSTGRES_USER` + `POSTGRES_DB`. The URL wins when both are set.
 
 ```bash title=".env"
 DB_CONNECTION_URL="postgres://username:password@localhost:5432/myapp"
 ```
 
-BunSane reads this variable on startup. Make sure the database exists before starting your app.
+The database must exist before the process starts. Pool size, timeouts, and admission are in [Configuration](./configuration.md).
 
-Alternatively, set the individual `POSTGRES_HOST` / `POSTGRES_USER` /
-`POSTGRES_PASSWORD` / `POSTGRES_DB` fields. See [Configuration](./configuration.md)
-for the full list of environment variables.
+## Tables BunSane creates
 
-## Automatic Table Setup
+| Object | When | What it holds |
+|--------|------|----------------|
+| `entities` | Every boot | `id` (UUID), `created_at`, `updated_at`, `deleted_at` (`timestamptz`) |
+| `components` | Every boot | One JSONB row per component. LIST-partitioned by `type_id` unless `BUNSANE_PARTITION_STRATEGY=hash` |
+| `bunsane_num_v1(text)` | Every boot | Immutable numeric-or-NULL cast. Never replaced in place |
+| `m3_<name>`, `m3_readmodel_state` | A `@ReadModel` class is registered | Cross-entity rows. See [Read models](./read-models.md) |
+| `projection_state`, `rm_<name>` | `BUNSANE_QSP` is `shadow` or `route` | Optional list accelerator. The table name is lowercased (`OrderList` → `rm_orderlist`). See [QSP](./qsp.md) |
+| `bunsane_locks` | First postgres-lease lock | Scheduler / `withLock` leases. Not created when the lock backend is `in-process` |
 
-When your app starts for the first time, BunSane creates:
+`entity_components` is not created. Membership is `components` (`UNIQUE (entity_id, type_id)`).
 
-- A base **entity table** for tracking all entities
-- A **component table** for each component you define with `@Component`
-- **Indexes** on fields marked with `@CompData({ indexed: true })`
+`entities` also gets `idx_entities_deleted_null` (`id` where `deleted_at IS NULL`) and, on `main`, key indexes on `created_at` and `updated_at`.
 
-When you add new components or change fields, BunSane detects the changes and updates the schema automatically. You do not need to write migrations.
+Adding a component or a field does not require a hand-written migration. Register the class before `init()` (import it from your app entry). A component registered after boot still receives its key indexes.
+
+## Key indexes
+
+A **key index** is a btree named `bk_<slug>_<hash>` on `((key), entity_id)`. It is not partial (`WHERE deleted_at IS NULL` is applied by the query, not the index), so the planner keeps expression statistics. One index serves `=`, ranges, both sort directions, both `NULL` placements, and keyset pages.
+
+| Marker | Index |
+|--------|--------|
+| `@CompData({ indexed: true })` on a scalar | Key index. Text, enum, boolean, and `Date` use `(data->>'field')`. A `number` field uses `(bunsane_num_v1(data->>'field'))` |
+| `@CompData({ indexed: true })` on an array or object | GIN on `(data->'field')` with `jsonb_path_ops`. Not a sort key |
+| `@CompositeIndex(["status", "total"])` | `(status, total, entity_id)` on that component. Equality on the leading fields, sort or range on the next. Exported from `"bunsane"`. At least two fields; an unknown field fails boot |
+| `entities.created_at` / `updated_at` | Key indexes for `sortByCreatedAt` / `sortByUpdatedAt`. Values are UTC milliseconds |
+
+`@IndexedField` is not on the root barrel. Import it from `bunsane/core/decorators/IndexedField`. The default type is `"gin"`, not `"btree"`.
+
+| `@IndexedField(...)` | What boot creates |
+|----------------------|-------------------|
+| `"btree"` | Key index on `(data->>'field', entity_id)`. `isDateField` is recorded only; the expression stays text |
+| `"numeric"` | Key index on `bunsane_num_v1(data->>'field')`. Non-numeric text is NULL, not a cast error (0.9, unreleased) |
+| `"gin"` | `USING GIN ((data->'field') jsonb_path_ops)`. Not a sort key. An explicit `"gin"` on a field that also has a key index is kept |
+| `"hash"` | `USING HASH ((data->>'field'))`. Equality only |
+| `"fulltext"` | `USING GIN (to_tsvector('english', data->'field'))`. Not a sort key |
+
+```typescript
+import { BaseComponent, Component, CompData, CompositeIndex } from "bunsane";
+import { IndexedField } from "bunsane/core/decorators/IndexedField";
+
+@CompositeIndex<Order>(["status", "total"])
+@Component
+class Order extends BaseComponent {
+  @CompData({ indexed: true }) status: string = "open";
+  @CompData({ indexed: true }) total: number = 0;
+  @CompData({ arrayOf: String })
+  @IndexedField("gin")
+  tags: string[] = [];
+}
+```
+
+Put `@CompositeIndex` above `@Component`.
+
+### Index reconciler
+
+`database/indexReconciler.ts` runs from `App.init()`:
+
+- Creates missing `bk_` indexes. On real PostgreSQL the build is `CREATE INDEX CONCURRENTLY` (writes are not blocked). PGlite strips `CONCURRENTLY`.
+- Rebuilds invalid indexes.
+- Drops a legacy `idx_<leaf>_<field>_btree`, `_btree_date`, `_numeric`, or scalar `_gin` **only after** its `bk_` replacement is valid. QSP's `idx_rm_<lowercase>__cover` (for example `idx_rm_orderlist__cover`) is dropped the same way, after per-column `bk_` indexes exist.
+- Does not drop indexes that lack the `bk_` prefix, except those legacy names. An index you created under another name is left alone.
+
+Tables whose `reltuples` estimate is below `BUNSANE_INDEX_SYNC_MAX_ROWS` (default 100000) are indexed during `init()`. Larger tables, and unanalyzed tables bigger than 64 MB, are indexed by a background task after `init()`, under `withLock("bunsane:index-reconcile")`, so only one instance builds. Shutdown does not wait past the grace budget; the next boot repairs an invalid index. Lists stay correct while a background build is running; they are not yet fast.
+
+Invalid values for `BUNSANE_INDEX_SYNC_MAX_ROWS` fail `init()` (0.9, unreleased).
 
 ## Transactions
 
-When you need multiple operations to succeed or fail as a unit, use `db.transaction()`:
+Pass one transaction handle into every read and write that must commit together. The default export is a lazy proxy: `db.transaction`, `db.begin`, and `db.unsafe` forward to the live client. `db === getDb()` is false, and `db instanceof SQL` is false. Use `getDb()` when a library checks identity.
 
 ```typescript
+import { Entity } from "bunsane";
 import db from "bunsane/database";
 
 const result = await db.transaction(async (trx) => {
-    const fromAccount = await Entity.FindById(fromAccountId, trx);
-    const fromBalance = await fromAccount.get(BalanceComponent, { trx });
+  const fromAccount = await Entity.FindById(fromAccountId, trx);
+  const toAccount = await Entity.FindById(toAccountId, trx);
+  if (!fromAccount || !toAccount) throw new Error("Missing account");
 
-    if (fromBalance.amount < amount) {
-        throw new Error("Insufficient funds"); // Rolls back everything
-    }
+  const fromBalance = await fromAccount.get(BalanceComponent, { trx });
+  if (!fromBalance || fromBalance.amount < amount) {
+    throw new Error("Insufficient funds");
+  }
+  const toBalance = await toAccount.get(BalanceComponent, { trx });
 
-    await fromAccount.set(BalanceComponent, { amount: fromBalance.amount - amount }, { trx });
-    await fromAccount.save(trx);
+  await fromAccount.set(
+    BalanceComponent,
+    { amount: fromBalance.amount - amount },
+    { trx },
+  );
+  await fromAccount.save(trx);
 
-    const toAccount = await Entity.FindById(toAccountId, trx);
-    const toBalance = await toAccount.get(BalanceComponent, { trx });
-    await toAccount.set(BalanceComponent, { amount: toBalance.amount + amount }, { trx });
-    await toAccount.save(trx);
+  await toAccount.set(
+    BalanceComponent,
+    { amount: (toBalance?.amount ?? 0) + amount },
+    { trx },
+  );
+  await toAccount.save(trx);
 
-    return { success: true };
+  return { success: true };
 });
 ```
 
-Pass the `trx` object to every entity operation inside the callback. If any operation throws an error, the entire transaction is rolled back.
+A throw rolls the database transaction back. Pass `trx` into `FindById`, `get` / `set` / `remove` (`{ trx }`), and `save`. Finish every check before the first `save(trx)`.
+
+Dirty flags flip when every statement in that save succeeds, not when the outer `db.transaction` commits. `save(trx)` marks the instance clean as soon as its own writes finish on your handle. If the callback throws after that, PostgreSQL rolls the rows back, but a retried `save()` sees a clean entity, logs that it is not dirty, and skips. Set the component again before retrying. The same flag flip happens inside the gateway callback when you call `save()` with no `trx`, before that transaction commits.
+
+`db.transaction` is Bun's transaction. It does not take an admission permit. `Entity.save` uses `dbTransaction` from `bunsane/database/gateway` when you do not pass `trx`, so that write gets one permit and can set `statement_timeout`. A `trx` you pass in stays on that handle and takes no extra permit. Use `dbTransaction` for your own multi-statement work when you want the same bound. Do not open a raw `BEGIN`.
+
+`get()` returns `null` when the component is absent. A database error throws `ComponentLoadError` (0.7+). Let that throw leave the callback so the transaction rolls back.
 
 ## Raw SQL
 
-For queries that go beyond BunSane's entity/component model, use raw SQL:
+Use the proxy's unsafe query when the builder cannot express the statement. Parameters are `$1`, `$2`, never interpolated input.
 
 ```typescript
 import db from "bunsane/database";
 
-const result = await db.query("SELECT * FROM custom_table WHERE id = $1", [id]);
+const rows = await db.unsafe(
+  "SELECT id FROM entities WHERE deleted_at IS NULL AND id = $1",
+  [id],
+);
 ```
 
-Use parameterized queries (`$1`, `$2`, etc.) to prevent SQL injection. Never interpolate user input directly into query strings.
+There is no `db.query`. Tagged templates (`await db\`SELECT …\``) also work. Prefer [list queries](./query-lists.md) for entity filters and sorts so they hit key indexes.
 
-## Prepared Statements
+## Prepared statements and PgBouncer
 
-BunSane uses prepared statements automatically for common query patterns. This improves security (preventing SQL injection) and performance (the database can reuse query plans).
+Bun prepares statements per connection. The framework does not keep a prepared-statement cache (removed in 0.7).
 
-On startup, BunSane warms up a prepared statement cache with frequently-used queries. You do not need to configure this.
+Behind PgBouncer **transaction** pooling, set `DB_DISABLE_PREPARE=true`. A prepared statement created on one backend does not exist on the next, and the write path can wedge. `?prepare=false` in the URL is not reliable. Put `statement_timeout` on the database role; `DB_STATEMENT_TIMEOUT` is ignored behind PgBouncer. Details: [Running behind PgBouncer](./configuration.md#running-behind-pgbouncer).
 
-## Connection Pooling
-
-Database connections are pooled automatically. BunSane reuses connections across requests, so you do not need to manage connection lifecycles yourself.
-
-Behind **PgBouncer transaction pooling**, set `DB_DISABLE_PREPARE=true` and put `statement_timeout` on the database role (not only in the app URL). See [Configuration](./configuration.md#running-behind-pgbouncer).
-
-## Component storage & indexes
-
-- Each `@Component` type is stored as JSONB rows (LIST-partitioned by type when `BUNSANE_PARTITION_STRATEGY=list`).
-- `@CompData({ indexed: true })` creates per-field expression indexes (btree / partial numeric / GIN by type).
-- Prefer querying through the [Query](./query-lists.md) builder rather than scanning raw JSONB without indexes.
-
-## Hot list reads (optional QSP)
-
-For stable multi-component admin/ops lists, [QSP](./qsp.md) can maintain an `rm_<archetype>` projection table and serve covered queries with a single index scan. Off by default (`BUNSANE_QSP=off`).
+Do not run the test suite through PgBouncer. `DB_DISABLE_PREPARE=true` serializes object parameters as `"[object Object]"`.

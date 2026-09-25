@@ -13,18 +13,13 @@ Without archetypes, you would need to manually specify which components to inclu
 
 When you define a `User` archetype, BunSane automatically:
 - Creates a `User` GraphQL type with fields matching your components
-- Creates a `UserInput` GraphQL input type for mutations
-- Provides helper methods for creating and updating entities
+- Creates helper methods for creating and updating entities. GraphQL inputs are per operation, not a `UserInput` type
 
 ## Defining an Archetype
 
 ```typescript
-import {
-    ArcheType,
-    ArcheTypeField,
-    BaseArcheType,
-    type ArcheTypeOwnProperties,
-} from "bunsane/core/ArcheType";
+import { ArcheType, ArcheTypeField, BaseArcheType } from "bunsane";
+import type { ArcheTypeOwnProperties } from "bunsane/core/ArcheType";
 import { NameComponent, EmailComponent, PhoneComponent } from "./components/UserComponent";
 
 @ArcheType("User")
@@ -98,8 +93,7 @@ Add fields that are calculated at query time using `@ArcheTypeFunction`. These a
 Decorate a method with `@ArcheTypeFunction` and provide a `returnType`. The method receives the resolved `Entity` and returns a computed value.
 
 ```typescript
-import { ArcheType, ArcheTypeField, ArcheTypeFunction, BaseArcheType } from "bunsane/core/ArcheType";
-import { Entity } from "bunsane/core/Entity";
+import { ArcheType, ArcheTypeField, ArcheTypeFunction, BaseArcheType, Entity } from "bunsane";
 
 @ArcheType("Customer")
 export class CustomerArcheTypeClass extends BaseArcheType {
@@ -109,7 +103,7 @@ export class CustomerArcheTypeClass extends BaseArcheType {
     @ArcheTypeField(MembershipComponent, { nullable: true })
     membership!: MembershipComponent;
 
-    @ArcheTypeFunction({ returnType: "String" })
+    @ArcheTypeFunction({ returnType: "string" })
     async display_name(entity: Entity) {
         const name = await entity.get(PersonNameComponent);
         if (!name) return "";
@@ -117,7 +111,7 @@ export class CustomerArcheTypeClass extends BaseArcheType {
         return [title, firstName, lastName].filter(Boolean).join(" ");
     }
 
-    @ArcheTypeFunction({ returnType: "Boolean" })
+    @ArcheTypeFunction({ returnType: "boolean" })
     async is_premium(entity: Entity) {
         const membership = await entity.get(MembershipComponent);
         if (!membership) return false;
@@ -126,30 +120,27 @@ export class CustomerArcheTypeClass extends BaseArcheType {
 }
 ```
 
-### Return Types
+`returnType` is required when the design return type is `Promise` or `Object` (the usual case for an `async` method). Omitting it throws at schema build. It does not fall back to `Any`.
 
-The `returnType` option is a GraphQL scalar or type name string. It is inserted verbatim into the generated schema, so the value must be a valid GraphQL type name.
+Built-in scalars: `"string"`, `"number"`, `"boolean"`, `"Date"` (or `"date"`). Any other string is an archetype or custom type name. An unknown name throws at schema build.
 
-| `returnType` value | GraphQL type |
+| `returnType` | GraphQL type |
 |---|---|
-| `"String"` | `String` |
-| `"Int"` | `Int` |
-| `"Float"` | `Float` |
-| `"Boolean"` | `Boolean` |
-| `"Point"` (or any custom name) | Inserted verbatim into the schema |
-
-Always specify `returnType` explicitly. If omitted, BunSane reflects the TypeScript return type -- but async methods reflect as `Promise`, which falls back to `Any` in the generated schema.
+| `"string"` | `String` |
+| `"number"` | `Float` |
+| `"boolean"` | `Boolean` |
+| `"Date"` | `Date` |
+| `"Order"` (a registered archetype) | that type |
 
 ### Arguments
 
 `@ArcheTypeFunction` supports GraphQL arguments via the `args` option. Each entry specifies a `name`, a `type` constructor, and an optional `nullable` flag.
 
 ```typescript
-import { ArcheTypeFunction } from "bunsane/core/ArcheType";
-import { Entity } from "bunsane/core/Entity";
+import { ArcheTypeFunction, Entity } from "bunsane";
 
 @ArcheTypeFunction({
-    returnType: "Float",
+    returnType: "number",
     args: [
         { name: "unit", type: String, nullable: true },
     ],
@@ -178,121 +169,128 @@ Arguments with `nullable: false` (the default) are required -- the resolver thro
 
 | | `@ArcheTypeField` | `@ArcheTypeFunction` |
 |---|---|---|
-| Source | ECS component data from DB/cache | Method on the archetype class |
-| GraphQL input | Included in the generated input type | Excluded from input types |
-| Arguments | None | Supported via `args` option |
-| DataLoader | Batched automatically | Calls method directly per entity |
+| Source | Component data | Method on the archetype class |
+| GraphQL input | Included in the generated input type | Excluded |
+| Arguments | None | `args` option |
+| Batching | Loaded with the field DataLoader | Per entity, unless `batch: true` |
 
-### Registering Resolvers
+You do not call `registerFieldResolvers`. Schema build attaches field, relation, and function resolvers (0.7+). The method remains and is idempotent.
 
-For `@ArcheTypeFunction` (and relations) to resolve in GraphQL, call `registerFieldResolvers()` in your service constructor. See [Registering Field Resolvers](#registering-field-resolvers) below.
+### Batched functions (0.8+)
+
+`batch: true` calls the method once per request with every parent:
+
+```typescript
+import { ArcheTypeFunction, Entity } from "bunsane";
+
+@ArcheTypeFunction({ returnType: "number", batch: true })
+async openOrderCount(
+    parents: readonly Entity[],
+    _ctx: unknown,
+): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    for (const parent of parents) {
+        counts.set(parent.id, await countOpenOrders(parent.id));
+    }
+    return counts;
+}
+```
+
+The map is keyed by parent entity id. A missing key on a non-null field throws. Function fields are nullable unless you model them otherwise, so a missing key usually resolves to `null`.
 
 ### Generated Schema Example
 
 This archetype definition:
 
 ```typescript
-import { ArcheType, ArcheTypeField, ArcheTypeFunction, BaseArcheType } from "bunsane/core/ArcheType";
-import { Entity } from "bunsane/core/Entity";
+import { ArcheType, ArcheTypeField, ArcheTypeFunction, BaseArcheType, Entity } from "bunsane";
 
 @ArcheType("Store")
 export class StoreArcheTypeClass extends BaseArcheType {
     @ArcheTypeField(StoreInfoComponent)
     info!: StoreInfoComponent;
 
-    @ArcheTypeFunction({ returnType: "Boolean" })
+    @ArcheTypeFunction({ returnType: "boolean" })
     async is_open(entity: Entity) { ... }
 
     @ArcheTypeFunction({
-        returnType: "Float",
+        returnType: "number",
         args: [{ name: "unit", type: String, nullable: true }],
     })
     async distance_to(entity: Entity, unit?: string) { ... }
 }
 ```
 
-Generates this GraphQL schema:
+Weaving an archetype emits an **output** type only. There is no `StoreInput`. GraphQL inputs are per operation (`createStoreInput` from `@GraphQLOperation`). Nested component type names lower-case the first character of the class name. A tag with no `@CompData` fields is omitted. Every archetype type includes `id: ID`.
 
 ```graphql
 type Store {
-    info: StoreInfoComponent!
+    id: ID
+    info: storeInfoComponent!
     is_open: Boolean
     distance_to(unit: String): Float
 }
-
-input StoreInput {
-    info: StoreInfoComponentInput!
-}
 ```
 
-Computed fields do not appear in the input type -- only `@ArcheTypeField` fields are included in the generated `StoreInput`.
+Computed fields are not part of `getInputSchema()`. That method returns a Zod object, not a GraphQL input type.
 
 ## Relations
 
-Archetypes support relationships between entity types.
-
-### HasOne
-
-A one-to-one relationship:
+`HasOne`, `HasMany`, `BelongsTo`, and `BelongsToMany` are on the root barrel. The target may be a registered name, the archetype class, or a thunk `() => Class` (0.7+). An unregistered target throws at schema build.
 
 ```typescript
-import { HasOne } from "bunsane/core/ArcheType";
+import { BelongsTo, HasMany, HasOne } from "bunsane";
 
-@ArcheType("User")
-export class UserArcheTypeClass extends BaseArcheType {
-    @ArcheTypeField(ProfileComponent)
-    profile!: ProfileComponent;
+@HasOne(() => DriverArcheTypeClass)
+driver?: IDriverArcheType;
 
-    @HasOne("Driver", { foreignKey: "user_id", nullable: true })
-    driver?: IDriverArcheType;
-}
+@HasMany("Order")
+orders!: IOrderArcheType[];
+
+@BelongsTo(UserArcheTypeClass, { foreignKey: "device.user_id" })
+user!: IUserArcheType;
 ```
 
-### HasMany
+### Foreign key (0.8+)
 
-A one-to-many relationship:
+You may omit `foreignKey` only when exactly one `user_id` or `parent_id` property matches. Zero matches, or several, fail schema build and name the candidates. Set the dotted form yourself: `'<archetypeField>.<prop>'` — the field name on the owning archetype, not the class name.
 
 ```typescript
-import { HasMany } from "bunsane/core/ArcheType";
-
-@ArcheType("UserListResponse")
-export class UserListResponseArcheTypeClass extends BaseArcheType {
-    @ArcheTypeField(CountTag)
-    totalData!: number;
-
-    @HasMany("User", { foreignKey: "id", nullable: true })
-    items!: IUserArcheType[];
-}
+@BelongsTo("User", { foreignKey: "device.user_id" })
+user!: IUserArcheType;
 ```
 
-### BelongsTo
+Search looks at the related archetype for `hasMany`, `hasOne`, and `belongsToMany`, and at this archetype for `belongsTo`.
 
-The inverse side of HasOne or HasMany:
+### Nullability
+
+| Relation | Default | `nullable: false` |
+|---|---|---|
+| `HasOne` | nullable. A missing child is `null` | non-null |
+| `HasMany` / `BelongsToMany` | nullable list | required list |
+| `BelongsTo` | non-null | stays non-null; set `nullable: true` to allow null |
+
+`BelongsToMany` requires `through`.
 
 ```typescript
-import { BelongsTo } from "bunsane/core/ArcheType";
+@HasOne("Driver") // nullable unless nullable: false
+driver?: IDriverArcheType;
 
-@ArcheType("UserDevice")
-export class UserDeviceArcheTypeClass extends BaseArcheType {
-    @ArcheTypeField(UserDeviceComponent)
-    device!: UserDeviceComponent;
-
-    @BelongsTo("User", { foreignKey: "device.user_id" })
-    user!: IUserArcheType;
-}
+@HasMany("User", { foreignKey: "parent_id", nullable: false })
+items!: IUserArcheType[];
 ```
 
-Relations use string identifiers (the archetype name) rather than direct class references.
+Do not point `foreignKey` at `"id"` unless that property is the real foreign key. The old "scan every partition" lookup is gone.
 
 ## Creating Entities with Archetypes
 
-Use `fill()` and `createEntity()` for a shorthand way to create entities:
+`fill()` expects component data when the field is typed as a component class. A bare string is unwrapped to `{ value }` only when the field's design type is `String`, `Number`, `Boolean`, or `Date`.
 
 ```typescript
 const user = UserArcheType.fill({
-    name: "John Doe",
-    phone: "+1234567890",
-    email: "john@example.com",
+    name: { value: "John Doe" },
+    phone: { value: "+1234567890" },
+    email: { value: "john@example.com" },
 }).createEntity();
 
 await user.save();
@@ -302,8 +300,8 @@ You can also add extra components after creating:
 
 ```typescript
 const user = UserArcheType.fill({
-    name: "John Doe",
-    phone: "+1234567890",
+    name: { value: "John Doe" },
+    phone: { value: "+1234567890" },
 }).createEntity();
 
 user.add(PhoneComponent, { value: "+1234567890", verified: false });
@@ -312,14 +310,14 @@ await user.save();
 
 ## Updating Entities
 
-Use `updateEntity()` to update specific components on an existing entity:
+`updateEntity()` writes the same component-shaped payload:
 
 ```typescript
 const user = await Entity.FindById(userId);
 if (!user) throw new Error("User not found");
 
 const updated = await UserArcheType.updateEntity(user, {
-    name: "Jane Doe",
+    name: { value: "Jane Doe" },
 });
 
 await updated.save();
@@ -327,48 +325,31 @@ await updated.save();
 
 ## Input Schemas
 
-Archetypes can generate Zod schemas for input validation:
+`getInputSchema()` returns a Zod object with relations and functions excluded. `withValidation` merges extra Zod fields onto it. Use that for in-process checks.
 
 ```typescript
-// Full schema for the archetype
-const schema = UserArcheType.getZodObjectSchema();
-
-// Partial schema for update mutations
 const updateSchema = UserArcheType.getInputSchema().partial().pick({
     name: true,
 });
 ```
 
-These schemas are useful as inputs to `@GraphQLOperation` decorators (see [Services](./service.md)).
+Do not pass that Zod object as `@GraphQLOperation` `input` in new code. Zod and string-map inputs still work and log a deprecation warning. Prefer `t.*`. See [Services](./service.md).
 
-## Registering Field Resolvers
+## Field Resolvers
 
-For computed fields (`@ArcheTypeFunction`) and relations to work in GraphQL, register the archetype's field resolvers in your service:
-
-```typescript
-class UserService extends BaseService {
-    constructor(private app: App) {
-        super();
-        UserArcheType.registerFieldResolvers(this);
-    }
-}
-```
+Schema build registers computed fields and relations. You do not call `registerFieldResolvers` in the service constructor. If you do, the call is idempotent and skips pairs that are already registered.
 
 ## GraphQL Integration
 
-The `Customer` archetype defined above automatically generates these GraphQL types:
+The `Customer` archetype above becomes an output type. Nested component names are lowerCamelCase. There is no `CustomerInput`.
 
 ```graphql
 type Customer {
-    name: PersonNameComponent!
-    membership: MembershipComponent
+    id: ID
+    name: personNameComponent!
+    membership: membershipComponent
     display_name: String
     is_premium: Boolean
-}
-
-input CustomerInput {
-    name: PersonNameComponentInput!
-    membership: MembershipComponentInput
 }
 ```
 
@@ -384,3 +365,4 @@ async profile(args: {}, context: GraphQLContext) {
     return await Entity.FindById(userId);
 }
 ```
+

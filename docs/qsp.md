@@ -1,66 +1,96 @@
 ---
-sidebar_position: 6
-sidebar_label: QSP (read models)
+sidebar_position: 7
+sidebar_label: QSP
 ---
 
 # QSP — Query Surface Planner
 
-**Experimental** accelerator for hot multi-component list queries (BunSane 0.6.x).
+Optional accelerator for a hot multi-component **list**. Default is off. With `BUNSANE_QSP` unset or `off`, BunSane does not create `projection_state` or `rm_*` tables and does not dual-write.
 
-Default is **off**. With `BUNSANE_QSP=off`, behavior matches pre-QSP (no projection tables, no dual-write).
+Tables are `rm_<lowercase name>` — one row per **entity**. `OrderList` is `rm_orderlist`. They are not a join store and not an aggregate store.
 
-Related: [List queries](./query-lists.md) · [Configuration](./configuration.md#query-surface-planner-experimental)
+| Need | Use |
+|------|-----|
+| Filter, sort, and page one component, or an entity timestamp with no membership | A [key index](./database.md#key-indexes). This is the default. A single indexed sort stops at `.take(n)` |
+| The same list, but several components, and the legacy plan is still the hot statement | QSP, after the key indexes exist. Best when `.with()` matches a list-only archetype exactly |
+| `sortByCreatedAt().with(X)` and X is clustered in time | QSP. That shape stays on the fallback plan (0.9, unreleased) |
+| Join two entity types, then `SUM` / `GROUP BY` | [Read models](./read-models.md) (`m3_*`) |
+| Same-entity `GROUP BY` | [Query aggregates](./query-aggregates.md) |
+
+Related: [List queries](./query-lists.md) · [Configuration](./configuration.md#query-surface-planner)
 
 ## What it does
 
-For an eligible **archetype**, BunSane maintains a columnar table `rm_<archetype>` (one row per entity, projected `@CompData` fields as real columns) with a covering index. Dual-write on `entity.save()` keeps it in sync.
+For an eligible archetype, BunSane maintains `rm_<lowercase name>`: projected `@CompData` fields as real columns, plus `created_at` and `updated_at`. Dual-write on `entity.save()` keeps the row in sync once status is `BACKFILLING`, `SHADOW`, or `READY`. `DISABLED` is skipped.
 
-When a list query is **fully covered** and the projection is **READY**, the planner serves entity ids from a single index scan on `rm_*` instead of multi-partition INTERSECT + EXISTS.
+(0.9, unreleased) Each sortable column has its own `bk_` key index. The legacy covering index `idx_rm_<lowercase>__cover` (`idx_rm_orderlist__cover`) is dropped only after those key indexes are valid. Routed queries use the same ordering and keyset builder as the legacy engine, so NULL placement and `'before'` pages match.
 
-Uncovered queries, errors, and `BUNSANE_QSP=off` always use the **legacy** Query compiler. Routed failures fall back transparently — wrong results are not acceptable; speed is optional.
+When the query is fully covered and the projection is **READY**, the planner serves entity ids from `rm_*` instead of the legacy membership scan. Uncovered queries, errors, and `BUNSANE_QSP=off` use the legacy compiler. A routed failure falls back. Wrong results are not acceptable; speed is optional.
+
+After `exec()`:
+
+```typescript
+q.getLastRouteInfo();
+// { routed: true, surface: "rm", archetype: "OrderList", hasNextPage?: boolean }
+```
+
+## Modes
+
+`qspMode()` is read per call. `shadow` ↔ `route`, and either → `off`, flip without a redeploy. Turning QSP **on** (`off` → `shadow` or `route`) does not: `InitializeProjections` and the reconcile sweep run only if QSP was active at `App.init()`. Restart the process.
+
+| `BUNSANE_QSP` | Effect |
+|---------------|--------|
+| unset / `off` | No `rm_` serve, no projection tables, no dual-write |
+| `shadow` | Project and compare to legacy. Never serve `rm_` |
+| `route` | Serve when the projection is READY and the query is covered |
+
+`App.init()` starts the reconcile sweep for `shadow` and `route` (0.7+). `off` does not. A process that booted with `off` does not grow the sweep if you flip the variable later.
 
 ## Environment flags
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `BUNSANE_QSP` | `off` | `off` \| `shadow` (parity only, never serve) \| `route` (auto-promote and serve) |
-| `BUNSANE_QSP_ARCHETYPES` | empty | CSV of archetype names. **Empty = all eligible** (wide blast radius — scope on first rollout) |
-| `BUNSANE_QSP_COUNT` | `exact` | `exact` \| `n_plus_1` \| `estimate` — prefer `n_plus_1` for list UIs |
-| `BUNSANE_QSP_PROMOTE_MIN` | `50` | Clean shadow comparisons before READY (`route` mode) |
+| `BUNSANE_QSP` | `off` | `off` \| `shadow` \| `route` |
+| `BUNSANE_QSP_ARCHETYPES` | empty | CSV of archetype names. **Empty = all eligible** (wide dual-write — scope the first rollout) |
+| `BUNSANE_QSP_COUNT` | `exact` | `exact` \| `n_plus_1` \| `estimate`. Prefer `n_plus_1` for list UIs |
+| `BUNSANE_QSP_PROMOTE_MIN` | `50` | Clean shadow comparisons before READY (`route` only) |
 | `BUNSANE_QSP_BACKFILL_BATCH` | `5000` | Backfill batch size |
 | `BUNSANE_QSP_BACKFILL_THROTTLE_MS` | `50` | Sleep between batches |
 | `BUNSANE_QSP_HYDRATE` | `off` | When `on`, rebuild fully-columnar components from the `rm_` row |
-| `BUNSANE_QSP_HYDRATE_SHADOW` | `off` | Observe hydrate parity without serving |
+| `BUNSANE_QSP_HYDRATE_SHADOW` | `off` | Observe hydrate parity without serving. Does not feed READY promotion |
+| `BUNSANE_QSP_ENTITIES_ACCEL` | `false` | Reserved. Validated at boot and not read. It does not change routing. |
 
-Flip `BUNSANE_QSP` without redeploy (read at query time).
+## Coverage
 
-## Coverage rules
+A query routes only when all of these hold:
 
-A query routes only when **all** hold:
+1. `BUNSANE_QSP=route`, projection **READY**, archetype in scope.
+2. The `.with` component **set exactly equals** the archetype's projected component set.
+3. Filters are only `=`, `!=`, `>`, `<`, `>=`, `<=`, `IN`, `NOT IN`. Empty `IN` / `NOT IN` does not route.
+4. At most one sort key, and that field is projected (not a component-id column, not `FILLING`).
+5. Cursor is an unsorted id cursor, or a keyset cursor with that single sort. (0.9, unreleased) `'before'` and `nullsFirst` route. They did not on 0.8.
+6. No OR, no `.without`, no excluded entity ids, no `withId`.
 
-1. `BUNSANE_QSP=route`, projection **READY**, archetype in scope  
-2. Query `.with` component **set exactly equals** the archetype’s **projected** component set  
-3. Filters only: `=`, `!=`, `>`, `<`, `>=`, `<=`, `IN`, `NOT IN`  
-4. At most one sort key (field must be projected)  
-5. Cursor: unsorted id-cursor, or keyset `after` with single sort (not `before`)  
-6. No OR, no `.without` / exclusions, no `findById`-only shapes that mark the request uncovered  
+### Does not route
 
-### Does **not** route (legacy — still correct)
+Results stay correct on the legacy path.
 
 | Shape | Why |
 |-------|-----|
-| Empty **tag** in `.with(OrderTag)` | Tags have no `@CompData` → no projected columns → set mismatch |
-| Optional rare components on the archetype | Under-count if not every entity has them — use a list-only archetype |
-| Multi-archetype / cross-entity joins | No `rm_A ⋈ rm_B` |
-| `.without`, OR, ILIKE, spatial | Unsupported for coverage |
-| Multi-key sort | Not covered |
+| Empty tag in `.with(OrderTag)` | No `@CompData` means no projected columns, so the sets differ |
+| Optional components on the list archetype | Entities missing them drop out of `rm_` membership. Use a list-only archetype |
+| Multi-archetype / cross-entity | No `rm_A` join `rm_B`. Use a [read model](./read-models.md) or a second query |
+| `.without`, OR, ILIKE, spatial | Not covered. There is no `@Spatial` decorator |
+| Multi-key sort | `sorts.length > 1` stays legacy. Use `sortedCursor` on the legacy plan |
+| Id cursor combined with a sort | Refused. Use `sortedCursor` |
 
 ## List-only archetype
 
-GraphQL can still return a rich type. QSP needs a **stable list surface**:
+GraphQL can still return a rich type. QSP needs a stable list surface: every row has these components, and none of them are empty tags.
 
 ```typescript
-// QSP list shape — every real order always has these five; no empty tags
+import { ArcheType, ArcheTypeField, BaseArcheType, Query } from "bunsane";
+
 @ArcheType("OrderList")
 export class OrderListArchetypeClass extends BaseArcheType {
   @ArcheTypeField(OrderInfoComponent) info!: OrderInfoComponent;
@@ -70,7 +100,6 @@ export class OrderListArchetypeClass extends BaseArcheType {
   @ArcheTypeField(OrderTimelineComponent) timeline!: OrderTimelineComponent;
 }
 
-// Query must match that set exactly
 export function orderListQuery() {
   return new Query()
     .with(OrderStatusComponent)
@@ -82,68 +111,76 @@ export function orderListQuery() {
 }
 ```
 
-After exec under `route` + READY:
-
-```typescript
-q.getLastRouteInfo();
-// { routed: true, surface: 'rm', archetype: 'OrderList', hasNextPage?: boolean }
-```
+The query set must match that archetype exactly. Index the sort field as well; QSP does not replace a missing key index on the legacy fallback.
 
 ## Lifecycle
 
-`NONE → BACKFILLING → SHADOW → READY`
+Status is `DISABLED`, `BACKFILLING`, `SHADOW`, or `READY`. There is no `NONE`.
 
-1. First covered list query (when QSP ≠ off) lazy-creates the projection and starts dual-write + backfill.  
-2. **SHADOW**: still serves legacy; compares id-set/order/count to `rm_`.  
-3. **READY** (`route` only): after enough clean comparisons (`BUNSANE_QSP_PROMOTE_MIN`), serves from `rm_`.  
-4. **Rollback:** set `BUNSANE_QSP=off` — instant legacy; `rm_` tables remain disposable.
+**Unscoped** (`BUNSANE_QSP_ARCHETYPES` empty): the first covered list query calls `ensureProjection`, inserts `projection_state` as `BACKFILLING`, and starts backfill.
+
+**Scoped** (`BUNSANE_QSP_ARCHETYPES=OrderList`): `App.init` creates the `rm_` table and inserts the row as `DISABLED`. `ensureProjection` then returns immediately, because the descriptor is already registered, so the first query does **not** backfill. Dual-write skips `DISABLED`. Call `runBackfill` yourself after boot:
+
+```typescript
+import { runBackfill } from "bunsane/database/projection";
+
+await runBackfill("OrderList");
+```
+
+`runBackfill` sets `BACKFILLING`, fills `rm_orderlist`, then sets `SHADOW`. It returns without writing if the descriptor was not registered, or if another instance holds the postgres lease `qsp-backfill-OrderList`. That lease is `getDistributedLock()` (the postgres lease table), not `pg_advisory_lock`.
+
+1. **SHADOW** still serves legacy and compares id-set, order, and count.
+2. **READY** (`route` only): after `BUNSANE_QSP_PROMOTE_MIN` clean comparisons, serves from `rm_`.
+3. Rollback: `BUNSANE_QSP=off`. That flip is live. `rm_` tables can be dropped later; they are not the source of truth.
 
 ## Hydration
 
-By default, QSP accelerates **id selection** (and count strategy). Entities still hydrate from `components` unless:
+By default QSP accelerates id selection (and the count strategy). Entities still hydrate from `components` unless:
 
 ```bash
 BUNSANE_QSP_HYDRATE=on
 ```
 
-Only fully columnar components (entire `@CompData` surface projectable) come from the row. Empty tags never do.
+Only fully columnar components (every `@CompData` field projected) come from the row. Empty tags never do.
 
 ## Reconcile sweep
 
-```typescript
-import { startReconcileSweep } from "bunsane/database/projection";
+When `BUNSANE_QSP` is `shadow` or `route`, `App.init()` starts `startReconcileSweep()` (default every 300 seconds) and shutdown stops it (0.7+). The log line is `QSP reconcile sweep started`. Do not start a second sweep from application code.
 
-// App does NOT start this automatically
-if (process.env.BUNSANE_QSP === "shadow" || process.env.BUNSANE_QSP === "route") {
-  startReconcileSweep(300_000); // every 5 minutes
-}
-```
+`off` does not start it. A script that is not an `App` and still needs drift repair may call `startReconcileSweep` from `bunsane/database/projection` and must stop the returned function before exit.
 
-Repairs drift (`qsp_drift_total`). Run it in multi-instance production.
+The sweep samples `rm_` rows, recomputes them from `components`, and repairs drift. It runs only on `READY` and `SHADOW`, under the same postgres lease (`qsp-reconcile-<name>`), not an advisory lock.
 
 ## First production checklist
 
-1. Pick one hot list with a stable multi-component set.  
-2. Declare a list-only archetype (no empty tags, no rare optionals).  
-3. Align the Query builder to that exact set.  
-4. Index filter/sort fields.  
-5. Scope: `BUNSANE_QSP_ARCHETYPES=OrderList` (example).  
-6. Staging: `BUNSANE_QSP=shadow`, `BUNSANE_QSP_COUNT=n_plus_1`, start reconcile.  
-7. Soak with zero shadow divergences.  
-8. Flip `BUNSANE_QSP=route`; confirm `getLastRouteInfo().routed === true`.  
-9. Optional: hydrate shadow, then `BUNSANE_QSP_HYDRATE=on`.  
-10. Rollback anytime: `BUNSANE_QSP=off`.
+1. Confirm the sort and filter fields already have key indexes. QSP is the second step, not the first.
+2. Pick one hot list with a stable multi-component set.
+3. Declare a list-only archetype (no empty tags, no rare optionals).
+4. Align the `Query` builder to that exact set. One sort key.
+5. Scope: `BUNSANE_QSP_ARCHETYPES=OrderList`. Restart so `init()` creates `rm_orderlist` as `DISABLED`.
+6. Staging: `BUNSANE_QSP=shadow`, `BUNSANE_QSP_COUNT=n_plus_1`. Confirm the sweep started. Then `await runBackfill("OrderList")` from `bunsane/database/projection`. Do not call `startReconcileSweep` yourself inside `App`.
+7. Soak until `qspPlannerMetrics.shadowDivergenceTotal` stays `0` and `shadowComparedTotal` is moving. These counters are in-process, not Prometheus.
+8. Flip `BUNSANE_QSP=route` without a restart. Confirm `getLastRouteInfo().routed === true` and `surface === "rm"`.
+9. Optional: hydrate shadow, then `BUNSANE_QSP_HYDRATE=on`.
+10. Rollback any time: `BUNSANE_QSP=off`.
 
-## Metrics (names)
+## Metrics
 
-| Metric | Meaning |
-|--------|---------|
-| `qsp_shadow_divergence_total` | Must be 0 before trusting route |
-| `qsp_shadow_compared_total` | Shadow is exercising covered queries |
-| `qsp_route_total` | Served from `rm_` |
-| `qsp_fallback_total` | Route attempted, fell to legacy |
-| `qsp_drift_total` | Reconcile repairs |
+There is no `qsp_*` Prometheus series. `/metrics` does not include them. Access logs do not carry `surface`.
 
-## One-line invariant
+```typescript
+import { qspPlannerMetrics } from "bunsane/query/planner";
 
-Off ⇒ legacy. Shadow clean ⇒ `rm_` matches legacy. Route ⇒ same results, one index scan for **covered** shapes. Tags / multi-archetype / without / OR stay on legacy.
+qspPlannerMetrics.shadowComparedTotal;   // number
+qspPlannerMetrics.shadowDivergenceTotal; // number; must stay 0 before route
+qspPlannerMetrics.driftTotal;            // number
+qspPlannerMetrics.routeTotal;            // Record<archetype, number>
+qspPlannerMetrics.fallbackTotal;         // Record<reason, number>
+qspPlannerMetrics.lastDivergences;       // last 100 { archetype, kind, detail, at }
+```
+
+Per request, `getLastRouteInfo()` is `{ routed, surface: "rm" | "legacy", archetype? }`. `surface` is never `"entities"`.
+
+Operator detail: [QSP_OPERATIONS.md](https://github.com/yauruu/bunsane/blob/main/docs/QSP_OPERATIONS.md).
+
+Off means legacy. Shadow clean means `rm_` matches legacy. Route means the same results, from `rm_` key indexes, for covered shapes only. Tags, multi-archetype, `.without`, OR, and multi-key sorts stay on legacy.

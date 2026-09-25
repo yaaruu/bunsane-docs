@@ -12,18 +12,19 @@ Components are the building blocks of data in BunSane. Every piece of informatio
 Think of an **Entity** as just an ID -- it represents a "thing" in your app (a user, an order, a product). By itself, an entity holds no data.
 
 A **Component** is a piece of data you attach to an entity. For example, a "User" entity might have:
+
 - A `NameComponent` storing the user's name
 - An `EmailComponent` storing the email address
 - A `PasswordComponent` storing the hashed password
 
-This approach is flexible: you can attach any combination of components to any entity, and you can add or remove components over time.
+You can attach any combination of components to any entity, and you can add or remove components over time.
 
 ## Defining a Component
 
-Create a file at `src/components/UserComponent.ts`:
+Create `src/components/UserComponent.ts`:
 
 ```typescript title="src/components/UserComponent.ts"
-import { Component, BaseComponent, CompData } from "bunsane/core/components";
+import { BaseComponent, CompData, Component } from "bunsane";
 
 @Component
 export class NameComponent extends BaseComponent {
@@ -49,21 +50,25 @@ export class PasswordComponent extends BaseComponent {
 
 Here is what each part does:
 
-- **`@Component`** registers the class with BunSane so it knows to create a database table for it
-- **`extends BaseComponent`** gives the component its internal ID and lifecycle methods
-- **`@CompData()`** marks a field as stored data -- fields without this decorator are not persisted
-- **`{ indexed: true }`** creates a database index on this field for faster lookups
+- **`@Component`** registers the class so BunSane creates a table (or partition) for it. The decorator takes no options.
+- **`extends BaseComponent`** gives the component its id and lifecycle methods.
+- **`@CompData()`** marks a field as stored data. Fields without it are not persisted.
+- **`{ indexed: true }`** creates a **key index** (0.9, unreleased) when the field is not an array: `bk_<slug>_<hash>` on `(data->>'field', entity_id)`. It is not a GIN index. Only `arrayOf` fields get GIN from `indexed: true`. An object field gets a text key index; use `@IndexedField("gin")` from `"bunsane/core/decorators/IndexedField"` if you need GIN. Index the fields you filter or sort by. See [List queries](../query-lists.md).
+
+`nullable: true` stores the field as optional. The default is required.
+
+`emitDecoratorMetadata` is required. BunSane reads `design:type` to detect `Date` and `number`. On read, a valid ISO string in a `Date` field comes back as a `Date` (0.7+). An invalid string is left as a string so a later `save()` can reject it.
 
 ## What Is a Tag?
 
-A **Tag** is a component with no data. It is used to label entities so you can find them by type.
+A **Tag** is a component with no data. It labels entities so you can find them by type.
 
 ```typescript
 @Component
 export class UserTag extends BaseComponent {}
 ```
 
-Tags are useful for queries. For example, to find "all users", you query for entities that have a `UserTag` attached. You will see this in action when you build a service.
+To find "all users", query for entities that have `UserTag`. You will use that in a service.
 
 ## Components with Multiple Fields
 
@@ -86,27 +91,28 @@ export class AddressComponent extends BaseComponent {
 }
 ```
 
-Group related data into one component. Use separate components for data that changes independently or that not every entity needs.
+Group related data into one component. Use separate components for data that changes independently, or that not every entity needs.
 
 ## Register Your Components
 
-For BunSane to discover your components, you need to import them in your App class. This ensures the `@Component` decorators execute during startup.
+Import component files from your App class so the `@Component` decorators run at startup:
 
 ```typescript title="src/App.ts"
-import App from "bunsane/core/App";
+import "reflect-metadata";
+import { App } from "bunsane";
 
-// Import components so decorators are executed
 import "./components/UserComponent";
 
 export default class MyAPI extends App {
     constructor() {
         super("MyAPI", "0.1.0");
+        this.setCors({ origin: "http://localhost:5173" });
     }
 }
 ```
 
-When your app starts, BunSane automatically creates the database tables for each component.
+`init()` creates the tables. You do not write migrations for ordinary component fields.
 
 ## What's Next
 
-Now that you know how to define components, let's group them into a meaningful shape. In the next section, you will create your first **Archetype** -- a named group of components that automatically becomes a GraphQL type.
+Next you group these components into an archetype. That named shape becomes a GraphQL type.

@@ -28,7 +28,7 @@ todo-api/
 ### Component Definition
 
 ```typescript title="src/components/TodoComponent.ts"
-import { BaseComponent, CompData, Component } from "bunsane/core/components";
+import { BaseComponent, CompData, Component } from "bunsane";
 
 @Component
 export class TodoTag extends BaseComponent {}
@@ -52,13 +52,9 @@ export class TodoInfoComponent extends BaseComponent {
 ### Archetype Definition
 
 ```typescript title="src/archetypes/TodoArcheType.ts"
-import {
-    ArcheType,
-    ArcheTypeField,
-    BaseArcheType,
-    type ArcheTypeOwnProperties,
-} from "bunsane/core/ArcheType";
-import { TodoTag, TodoInfoComponent } from "../components/TodoComponent";
+import { ArcheType, ArcheTypeField, BaseArcheType } from "bunsane";
+import type { ArcheTypeOwnProperties } from "bunsane/core/ArcheType";
+import { TodoInfoComponent, TodoTag } from "../components/TodoComponent";
 
 @ArcheType("Todo")
 export class TodoArcheTypeClass extends BaseArcheType {
@@ -76,59 +72,53 @@ export const TodoArcheType = new TodoArcheTypeClass();
 ### Service Definition
 
 ```typescript title="src/services/TodoService.ts"
-import { BaseService } from "bunsane/service";
-import { GraphQLOperation } from "bunsane/gql";
-import App from "bunsane/core/App";
-import { Entity } from "bunsane/core/Entity";
-import { Query } from "bunsane/query";
-import type { GraphQLContext } from "bunsane/types/graphql.types";
-import { z } from "zod";
+import {
+    BaseService,
+    Entity,
+    GraphQLOperation,
+    Query,
+    t,
+} from "bunsane";
 import { TodoArcheType } from "../archetypes/TodoArcheType";
-import { TodoTag, TodoInfoComponent } from "../components/TodoComponent";
+import { TodoInfoComponent, TodoTag } from "../components/TodoComponent";
 
 class TodoService extends BaseService {
-    constructor(private app: App) {
-        super();
-        TodoArcheType.registerFieldResolvers(this);
-    }
-
     @GraphQLOperation({
         type: "Query",
+        input: { id: t.id().required() },
         output: TodoArcheType,
     })
-    async getTodo(args: { id: string }, context: GraphQLContext) {
-        return await Entity.FindById(args.id);
+    async getTodo(input: { id: string }) {
+        return await Entity.FindById(input.id);
     }
 
     @GraphQLOperation({
         type: "Query",
         output: [TodoArcheType],
     })
-    async listTodos(args: {}, context: GraphQLContext) {
+    async listTodos() {
         return await new Query()
             .with(TodoTag)
             .with(TodoInfoComponent)
             .sortBy(TodoInfoComponent, "createdAt", "DESC")
+            .take(20)
             .exec();
     }
 
     @GraphQLOperation({
         type: "Mutation",
-        input: z.object({
-            title: z.string(),
-            description: z.string(),
-        }),
+        input: {
+            title: t.string().required(),
+            description: t.string(),
+        },
         output: TodoArcheType,
     })
-    async createTodo(
-        args: { title: string; description?: string },
-        context: GraphQLContext
-    ) {
+    async createTodo(input: { title: string; description?: string }) {
         const todo = Entity.Create()
             .add(TodoTag, {})
             .add(TodoInfoComponent, {
-                title: args.title,
-                description: args.description || "",
+                title: input.title,
+                description: input.description ?? "",
                 completed: false,
                 createdAt: new Date(),
             });
@@ -139,27 +129,31 @@ class TodoService extends BaseService {
 
     @GraphQLOperation({
         type: "Mutation",
-        input: z.object({
-            id: z.string(),
-            title: z.string(),
-            description: z.string(),
-            completed: z.boolean(),
-        }),
+        input: {
+            id: t.id().required(),
+            title: t.string(),
+            description: t.string(),
+            completed: t.boolean(),
+        },
         output: TodoArcheType,
     })
-    async updateTodo(
-        args: { id: string; title?: string; description?: string; completed?: boolean },
-        context: GraphQLContext
-    ) {
-        const todo = await Entity.FindById(args.id);
+    async updateTodo(input: {
+        id: string;
+        title?: string;
+        description?: string;
+        completed?: boolean;
+    }) {
+        const todo = await Entity.FindById(input.id);
         if (!todo) throw new Error("Todo not found");
 
         const currentInfo = await todo.get(TodoInfoComponent);
+        if (!currentInfo) throw new Error("Todo has no info");
+
         await todo.set(TodoInfoComponent, {
             ...currentInfo,
-            ...(args.title !== undefined && { title: args.title }),
-            ...(args.description !== undefined && { description: args.description }),
-            ...(args.completed !== undefined && { completed: args.completed }),
+            ...(input.title !== undefined && { title: input.title }),
+            ...(input.description !== undefined && { description: input.description }),
+            ...(input.completed !== undefined && { completed: input.completed }),
         });
 
         await todo.save();
@@ -168,11 +162,11 @@ class TodoService extends BaseService {
 
     @GraphQLOperation({
         type: "Mutation",
-        input: z.object({ id: z.string() }),
-        output: z.boolean(),
+        input: { id: t.id().required() },
+        output: "Boolean",
     })
-    async deleteTodo(args: { id: string }, context: GraphQLContext) {
-        const todo = await Entity.FindById(args.id);
+    async deleteTodo(input: { id: string }) {
+        const todo = await Entity.FindById(input.id);
         if (!todo) return false;
         await todo.delete();
         return true;
@@ -182,11 +176,12 @@ class TodoService extends BaseService {
 export default TodoService;
 ```
 
+Clients pass one argument named `input`, for example `createTodo(input: { title: "Buy milk" })`. The method receives the unwrapped object.
+
 ### Application Setup
 
 ```typescript title="src/App.ts"
-import App from "bunsane/core/App";
-import { ServiceRegistry } from "bunsane/service";
+import { App, ServiceRegistry } from "bunsane";
 
 import "./components/TodoComponent";
 import TodoService from "./services/TodoService";
@@ -194,7 +189,7 @@ import TodoService from "./services/TodoService";
 export default class TodoAPI extends App {
     constructor() {
         super("TodoAPI", "1.0.0");
-        ServiceRegistry.registerService(new TodoService(this));
+        ServiceRegistry.registerService(new TodoService());
     }
 }
 ```
@@ -215,7 +210,7 @@ An example showing REST endpoints for user registration and login.
 ### Components
 
 ```typescript title="src/components/UserComponent.ts"
-import { BaseComponent, CompData, Component } from "bunsane/core/components";
+import { BaseComponent, CompData, Component } from "bunsane";
 
 @Component
 export class UserTag extends BaseComponent {}
@@ -245,11 +240,9 @@ export class NameComponent extends BaseComponent {
 ### Auth Service
 
 ```typescript title="src/services/AuthService.ts"
-import { BaseService, Post } from "bunsane/service";
+import { App, BaseService, Entity, Query } from "bunsane";
+import { Post } from "bunsane/service";
 import { ApiDocs, ApiTags } from "bunsane/swagger";
-import App from "bunsane/core/App";
-import { Entity } from "bunsane/core/Entity";
-import { Query } from "bunsane/query";
 import { z } from "zod";
 import {
     UserTag, PasswordComponent, EmailComponent, NameComponent,
@@ -407,21 +400,15 @@ export default AuthService;
 An example showing how to use entity hooks for side effects like logging and real-time notifications.
 
 ```typescript title="src/services/OrderService.ts"
-import { BaseService } from "bunsane/service";
-import { GraphQLOperation } from "bunsane/gql";
+import { App, BaseService, Entity, GraphQLOperation, logger as MainLogger, t } from "bunsane";
 import { ComponentTargetHook } from "bunsane/core/decorators/EntityHooks";
 import type { EntityCreatedEvent, EntityUpdatedEvent } from "bunsane/core/events/EntityLifecycleEvents";
-import App from "bunsane/core/App";
-import { Entity } from "bunsane/core/Entity";
-import { z } from "zod";
-import { logger as MainLogger } from "bunsane/core/Logger";
 
 const logger = MainLogger.child({ service: "OrderService" });
 
 class OrderService extends BaseService {
     constructor(private app: App) {
         super();
-        OrderArcheType.registerFieldResolvers(this);
     }
 
     @ComponentTargetHook("entity.created", {
@@ -459,27 +446,27 @@ class OrderService extends BaseService {
 
     @GraphQLOperation({
         type: "Mutation",
-        input: z.object({
-            customerId: z.string(),
-            items: z.array(z.object({
-                productId: z.string(),
-                quantity: z.number(),
-            })),
-        }),
+        input: {
+            customerId: t.id().required(),
+            items: t.list(t.object({
+                productId: t.id().required(),
+                quantity: t.int().required(),
+            }, "OrderItemInput")).required(),
+        },
         output: OrderArcheType,
     })
-    async createOrder(args: any, context: GraphQLContext) {
+    async createOrder(input: { customerId: string; items: { productId: string; quantity: number }[] }) {
         const order = Entity.Create()
             .add(OrderTag, {})
             .add(OrderInfoComponent, {
-                customerId: args.customerId,
-                items: args.items,
+                customerId: input.customerId,
+                items: input.items,
                 createdAt: new Date(),
             })
             .add(OrderStatusComponent, { value: "pending" });
 
         await order.save();
-        // The onOrderCreated hook fires automatically
+        // Sync hooks run before save() resolves. An async: true hook does not.
         return order;
     }
 }
@@ -494,36 +481,24 @@ export default OrderService;
 An example showing database transactions for atomic operations like fund transfers.
 
 ```typescript title="src/services/PaymentService.ts"
-import { BaseService } from "bunsane/service";
-import { GraphQLOperation } from "bunsane/gql";
-import App from "bunsane/core/App";
-import { Entity } from "bunsane/core/Entity";
+import { BaseService, Entity, GraphQLOperation, t } from "bunsane";
 import db from "bunsane/database";
-import { z } from "zod";
-import type { GraphQLContext } from "bunsane/types/graphql.types";
 
 class PaymentService extends BaseService {
-    constructor(private app: App) {
-        super();
-    }
-
     @GraphQLOperation({
         type: "Mutation",
-        input: z.object({
-            fromAccountId: z.string(),
-            toAccountId: z.string(),
-            amount: z.number(),
-        }),
-        output: z.object({
-            success: z.boolean(),
-            transactionId: z.string(),
-        }),
+        input: {
+            fromAccountId: t.id().required(),
+            toAccountId: t.id().required(),
+            amount: t.float().required(),
+        },
+        output: {
+            success: "Boolean!",
+            transactionId: "ID!",
+        },
     })
-    async transferFunds(
-        args: { fromAccountId: string; toAccountId: string; amount: number },
-        context: GraphQLContext
-    ) {
-        const { fromAccountId, toAccountId, amount } = args;
+    async transferFunds(input: { fromAccountId: string; toAccountId: string; amount: number }) {
+        const { fromAccountId, toAccountId, amount } = input;
 
         const result = await db.transaction(async (trx) => {
             const fromAccount = await Entity.FindById(fromAccountId, trx);
@@ -644,18 +619,11 @@ export function RequireRole(...roles: string[]) {
 ### Using the Decorators
 
 ```typescript title="src/services/UserService.ts"
-import { BaseService } from "bunsane/service";
-import { GraphQLOperation } from "bunsane/gql";
-import { Entity } from "bunsane/core/Entity";
-import { Query } from "bunsane/query";
+import { BaseService, Entity, GraphQLOperation, Query } from "bunsane";
 import type { GraphQLContext } from "bunsane/types/graphql.types";
 import { RequireJWT, RequireRole } from "../utilities/AuthDecorator";
 
 class UserService extends BaseService {
-    constructor(private app: App) {
-        super();
-        UserArcheType.registerFieldResolvers(this);
-    }
 
     @RequireJWT()
     @GraphQLOperation({
@@ -687,8 +655,7 @@ export default UserService;
 How to configure JWT authentication for your BunSane app.
 
 ```typescript title="src/App.ts"
-import App from "bunsane/core/App";
-import { ServiceRegistry } from "bunsane/service";
+import { App, ServiceRegistry } from "bunsane";
 import { createInlineSigningKeyProvider, useJWT } from "@graphql-yoga/plugin-jwt";
 
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
@@ -723,7 +690,7 @@ export default class SecureAPI extends App {
         this.addYogaPlugin(jwtPlugin);
 
         ServiceRegistry.registerService(new AuthService(this));
-        ServiceRegistry.registerService(new UserService(this));
+        ServiceRegistry.registerService(new UserService());
     }
 }
 ```

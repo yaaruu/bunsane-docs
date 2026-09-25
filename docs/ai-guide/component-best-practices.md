@@ -5,395 +5,250 @@ sidebar_label: Component Best Practices
 
 # Component Best Practices
 
-This guide covers optimal component design patterns for BunSane. Following these practices ensures efficient database storage, fast queries, and maintainable code.
-
-## Core Principle: Atomic Components
-
-**Components should be atomic and flat.** Each component should represent a single, cohesive piece of data without nested objects.
-
-### Why Atomic Components Matter
-
-1. **Database Efficiency**: Each component maps to a database column. Flat structures are stored and retrieved more efficiently
-2. **Query Performance**: Individual fields can be indexed; nested objects cannot
-3. **Selective Updates**: You can update specific fields without reading/writing the entire nested structure
-4. **Type Safety**: Flat structures have better TypeScript inference
-
-## Design Rules
-
-### Rule 1: No Nested Objects in Components
+How to shape components so queries stay index-driven. Import decorators from the root barrel:
 
 ```typescript
-// BAD - Nested object
+import { BaseComponent, Component, CompData, CompositeIndex } from "bunsane";
+```
+
+`IndexedField` is not on the barrel: `import { IndexedField } from "bunsane/core/decorators/IndexedField"`.
+
+## Keep components flat
+
+A component is one JSONB document on that component's partition, not a table column and not a nested object. Each `@CompData()` field is a key inside `data`. Flat keys can take a key index. Nested objects cannot.
+
+```typescript
+// BAD — nested object. No key index, no typed filter.
 @Component
 export class UserProfileComponent extends BaseComponent {
-    @CompData()
-    address: {                    // AVOID nested objects
-        street: string;
-        city: string;
-        country: string;
-        zipCode: string;
-    };
+  @CompData()
+  address!: {
+    street: string;
+    city: string;
+    zipCode: string;
+  };
 }
 
-// GOOD - Separate component for address
+// GOOD — one component, one concept, flat keys.
 @Component
 export class AddressComponent extends BaseComponent {
-    @CompData()
-    street: string = "";
+  @CompData()
+  street: string = "";
 
-    @CompData()
-    city: string = "";
+  @CompData()
+  city: string = "";
 
-    @CompData()
-    country: string = "";
-
-    @CompData({ indexed: true })
-    zipCode: string = "";
+  @CompData({ indexed: true })
+  zipCode: string = "";
 }
 ```
 
-### Rule 2: Group Frequently Accessed Fields Together
-
-Fields that are always read or written together should be in the same component.
+Group fields you always read or write together. Split fields that change on a different cadence, or that a list screen never needs.
 
 ```typescript
-// GOOD - Related fields grouped together
-@Component
-export class PersonNameComponent extends BaseComponent {
-    @CompData()
-    firstName: string = "";
-
-    @CompData()
-    lastName: string = "";
-
-    @CompData()
-    middleName: string = "";
-}
-
-// GOOD - Credentials that are always verified together
-@Component
-export class PhoneCredentialComponent extends BaseComponent {
-    @CompData({ indexed: true })
-    number: string = "";
-
-    @CompData()
-    verified: boolean = false;
-
-    @CompData()
-    verifiedAt: Date | null = null;
-}
-```
-
-### Rule 3: Separate by Access Pattern
-
-If some fields are read frequently but others rarely, split them.
-
-```typescript
-// Frequently accessed - displayed on every page
 @Component
 export class UserDisplayComponent extends BaseComponent {
-    @CompData()
-    displayName: string = "";
+  @CompData()
+  displayName: string = "";
 
-    @CompData()
-    avatarUrl: string = "";
+  @CompData()
+  avatarUrl: string = "";
 }
 
-// Rarely accessed - only on profile settings page
-@Component
-export class UserPreferencesComponent extends BaseComponent {
-    @CompData()
-    language: string = "en";
-
-    @CompData()
-    timezone: string = "UTC";
-
-    @CompData()
-    theme: string = "light";
-
-    @CompData()
-    emailNotifications: boolean = true;
-}
-```
-
-### Rule 4: Separate by Update Frequency
-
-Fields updated at different frequencies should be in different components.
-
-```typescript
-// Updated rarely - set during registration
-@Component
-export class AccountCreationComponent extends BaseComponent {
-    @CompData({ indexed: true })
-    createdAt: Date = new Date();
-
-    @CompData()
-    registrationSource: string = "";
-}
-
-// Updated frequently - changes with user activity
 @Component
 export class UserActivityComponent extends BaseComponent {
-    @CompData()
-    lastLoginAt: Date = new Date();
+  @CompData({ indexed: true })
+  lastLoginAt: Date = new Date();
 
-    @CompData()
-    loginCount: number = 0;
-
-    @CompData()
-    lastActiveAt: Date = new Date();
+  @CompData()
+  loginCount: number = 0;
 }
 ```
 
-### Rule 5: Use Tags for Categorization
+Give every field a default. `emitDecoratorMetadata` must be on so a `number` field is detected and its key uses `bunsane_num_v1()`. A `Date` is always a text key. There is no date key.
 
-Tags are empty components used for filtering and categorization.
+### Tags
+
+An empty component is a membership flag.
 
 ```typescript
-// Tags - no data, just markers
-@Component
-export class UserTag extends BaseComponent {}
-
 @Component
 export class AdminTag extends BaseComponent {}
 
 @Component
-export class VerifiedTag extends BaseComponent {}
-
-@Component
 export class SoftDeletedTag extends BaseComponent {}
-
-// Usage in queries
-const admins = await new Query()
-    .with(UserTag)
-    .with(AdminTag)
-    .exec();
-
-const activeUsers = await new Query()
-    .with(UserTag)
-    .without(SoftDeletedTag)
-    .exec();
 ```
 
-## Field Configuration
+Tags are fine for rare filters. They emit no projected columns, so a `.with(AdminTag)` list is never covered by [QSP](../qsp.md). For a hot list, store the flag as an indexed field on a data component every row has.
 
-### @CompData Options
+## What to index
 
-The `@CompData()` decorator accepts the following options:
+Index every scalar you filter or sort. A sort on a field with no key index is a full scan plus a top-N sort. In development the engine warns once per component field for that sort (`sortBy(...) has no key index`). An unindexed filter does not warn. Neither throws.
 
-```typescript
-@CompData(options?: {
-    indexed?: boolean;   // Enable database indexing for faster queries
-    nullable?: boolean;  // Mark field as optional (can be null)
-    arrayOf?: any;       // Specify array element type for array fields
-})
+Do not index fields you only display.
+
+### `@CompData({ indexed: true })` — the key index (0.9, unreleased)
+
+On a scalar (`arrayOf` unset) this creates one non-partial index:
+
+```text
+bk_<slug>_<hash> ON <leaf> ((<key>), entity_id)
 ```
 
-### Indexed Fields
+It is not a GIN index, and it is not partial (`WHERE deleted_at IS NULL` is not in the definition). One index serves equality, ranges, both sort directions, both NULLS placements, and keyset pages.
 
-Use `{ indexed: true }` for fields that are frequently used in WHERE clauses.
+| Field type | Key expression |
+|------------|----------------|
+| `string`, enum, `boolean`, `Date`, object | `(data->>'field')` |
+| `number` | `(bunsane_num_v1(data->>'field'))` |
+| `arrayOf` | Not a key index. GIN on `(data->'field')`. |
+
+`indexed: true` on an object (no `arrayOf`) is still a text key index. GIN on an object needs `@IndexedField("gin")`. `isDateField` does not change the expression. A `Date` is indexed as text, same as a string. Entity `created_at` / `updated_at` have their own key indexes; you do not add `@CompData` for those.
+
+Non-numeric text in a numeric field (`"n/a"`) is NULL. Sorting or filtering it does not raise `invalid input syntax for type numeric` (0.9, unreleased).
+
+Boolean filters compare JSON text: `data->>'f' = 'true'`. The strings `"yes"`, `"1"`, and `"t"` do not match (0.7+).
 
 ```typescript
 @Component
 export class EmailComponent extends BaseComponent {
-    @CompData({ indexed: true })    // Index: frequently searched
-    value: string = "";
+  @CompData({ indexed: true })
+  value: string = "";
 
-    @CompData()                      // No index: not searched
-    verified: boolean = false;
+  @CompData()
+  verified: boolean = false; // display-only — leave unindexed
 }
 ```
 
-**When to index:**
-- Fields used in `Query.filter()` conditions
-- Fields used for uniqueness checks
-- Fields used for sorting large datasets
+You do not also add `@IndexedField("btree")`. `indexed: true` is the key index. Stacking `"btree"` is redundant.
 
-**When NOT to index:**
-- Fields only used for display
-- Fields with high cardinality that are rarely queried
-- Boolean fields on small tables
+Boot creates missing `bk_` indexes (`CONCURRENTLY` on real PostgreSQL). Tables above `BUNSANE_INDEX_SYNC_MAX_ROWS` (default 100000) build in the background after `init()`. A component registered after boot still gets its indexes. You do not call an ensure-index helper.
 
-### Nullable Fields
+### `@CompositeIndex` — equality, then sort (0.9, unreleased)
 
-Use `{ nullable: true }` for optional fields that may not have a value.
+A single-field key index cannot serve `status = 'paid' ORDER BY total`. Add a composite. It is a class decorator, exported from `"bunsane"`. It needs at least two `@CompData` fields. An unknown name fails boot.
 
 ```typescript
-@Component
-export class ProfileComponent extends BaseComponent {
-    @CompData()
-    displayName: string = "";
+import { BaseComponent, Component, CompData, CompositeIndex } from "bunsane";
 
-    @CompData({ nullable: true })  // Optional field
-    bio: string | null = null;
-
-    @CompData({ nullable: true })
-    avatarUrl: string | null = null;
-}
-```
-
-### Default Values
-
-Always provide sensible default values.
-
-```typescript
-@Component
-export class OrderStatusComponent extends BaseComponent {
-    @CompData()
-    value: string = "pending";      // Default status
-
-    @CompData()
-    updatedAt: Date = new Date();   // Default to creation time
-}
-```
-
-## Component Naming Conventions
-
-| Type | Convention | Example |
-|------|------------|---------|
-| Data Component | `{Domain}Component` | `UserProfileComponent` |
-| Tag | `{Domain}Tag` | `AdminTag`, `VerifiedTag` |
-| Status | `{Domain}StatusComponent` | `OrderStatusComponent` |
-| Credential | `{Domain}CredentialComponent` | `PhoneCredentialComponent` |
-
-## Anti-Patterns to Avoid
-
-### Anti-Pattern 1: God Components
-
-```typescript
-// BAD - Too many unrelated fields
-@Component
-export class UserComponent extends BaseComponent {
-    @CompData() name: string = "";
-    @CompData() email: string = "";
-    @CompData() password: string = "";
-    @CompData() phone: string = "";
-    @CompData() address: string = "";
-    @CompData() city: string = "";
-    @CompData() country: string = "";
-    @CompData() preferences: string = "";
-    @CompData() lastLogin: Date = new Date();
-    @CompData() createdAt: Date = new Date();
-    // ... 20 more fields
-}
-
-// GOOD - Split into logical components
-@Component export class NameComponent extends BaseComponent { ... }
-@Component export class EmailComponent extends BaseComponent { ... }
-@Component export class PasswordComponent extends BaseComponent { ... }
-@Component export class PhoneComponent extends BaseComponent { ... }
-@Component export class AddressComponent extends BaseComponent { ... }
-```
-
-### Anti-Pattern 2: JSON Blob Fields for Structured Data
-
-```typescript
-// BAD - Storing structured data as JSON when you need to query it
-@Component
-export class UserSettingsComponent extends BaseComponent {
-    @CompData()
-    settings: string = "{}";  // Can't query individual settings
-}
-
-// GOOD - Explicit typed fields for queryable data
-@Component
-export class NotificationSettingsComponent extends BaseComponent {
-    @CompData()
-    emailEnabled: boolean = true;
-
-    @CompData()
-    pushEnabled: boolean = true;
-
-    @CompData()
-    smsEnabled: boolean = false;
-}
-
-// OK - JSON strings for truly dynamic/opaque metadata
-@Component
-export class UploadMetadataComponent extends BaseComponent {
-    @CompData()
-    metadata: string = "{}";  // External metadata that won't be queried
-}
-```
-
-**When JSON strings are acceptable:**
-- Storing opaque external metadata (e.g., file upload info, third-party API responses)
-- Data that will never be queried or filtered
-- Dynamic key-value data where the schema is unknown at compile time
-
-### Anti-Pattern 3: Computed Values in Components
-
-```typescript
-// BAD - Storing computed values
+@CompositeIndex<OrderComponent>(["status", "total"])
 @Component
 export class OrderComponent extends BaseComponent {
-    @CompData() subtotal: number = 0;
-    @CompData() tax: number = 0;
-    @CompData() total: number = 0;  // Computed from subtotal + tax
-}
+  @CompData({ indexed: true })
+  status: string = "open";
 
-// GOOD - Compute in archetype
-@ArcheType("Order")
-export class OrderArcheTypeClass extends BaseArcheType {
-    @ArcheTypeField(OrderAmountComponent)
-    amount!: OrderAmountComponent;
-
-    @ArcheTypeFunction({ returnType: "Float" })
-    async total(entity: Entity) {
-        const amount = await entity.get(OrderAmountComponent);
-        return (amount?.subtotal || 0) + (amount?.tax || 0);
-    }
+  @CompData({ indexed: true })
+  total: number = 0;
 }
 ```
 
-## Component Lifecycle Example
+The index is `(status, total, entity_id)`. Leading columns are equality. The next column is the sort or range. Keep the single-field `indexed: true` marks if you also filter or sort those fields alone.
+
+Order matters. `["status", "total"]` does not serve `ORDER BY status` after an equality on `total`.
+
+### `@IndexedField` — GIN, hash, fulltext, explicit numeric
+
+Import from `bunsane/core/decorators/IndexedField`. The default type is `"gin"`, not `"btree"`. A bare `@IndexedField()` is not a sort key.
+
+| Argument | Index now |
+|----------|-----------|
+| `"btree"` | Key index `(data->>'field', entity_id)`. Prefer `@CompData({ indexed: true })` instead. |
+| `"numeric"` | Key index on `bunsane_num_v1(data->>'field')`. Use this when the design type is not `number` but the values are numeric. Non-numeric text is NULL. |
+| `"gin"` | `USING GIN ((data->'field') jsonb_path_ops)`. Containment, not sort. An explicit gin on a key field survives boot. |
+| `"hash"` | `USING HASH ((data->>'field'))`. Equality only. Not a sort key. |
+| `"fulltext"` | `USING GIN (to_tsvector('english', data->'field'))`. Not a sort key. |
+
+GIN is still the right index when:
+
+- the field is an array (`arrayOf`) and you filter with `CONTAINS`, `CONTAINED_BY`, `HAS_ANY`, or `HAS_ALL`
+- you need JSONB containment on an object, not equality or sort
+- you need the English tsvector (`"fulltext"`)
 
 ```typescript
-// Define component
+import { IndexedField } from "bunsane/core/decorators/IndexedField";
+import { BaseComponent, Component, CompData } from "bunsane";
+
 @Component
-export class ProductInventoryComponent extends BaseComponent {
-    @CompData()
-    quantity: number = 0;
-
-    @CompData()
-    reservedQuantity: number = 0;
-
-    @CompData({ indexed: true })
-    sku: string = "";
-
-    @CompData()
-    lastRestockedAt: Date | null = null;
+export class TagSetComponent extends BaseComponent {
+  @IndexedField("gin")
+  @CompData({ indexed: true, arrayOf: String })
+  tags: string[] = [];
 }
+```
 
-// Create entity with component
-const product = Entity.Create()
-    .add(ProductTag, {})
-    .add(ProductInventoryComponent, {
-        quantity: 100,
-        sku: "PROD-001",
-    });
-await product.save();
+`indexed: true` plus `arrayOf` already creates that GIN index. Add `@IndexedField("gin")` when you want GIN on a scalar as well as, or instead of, a key index. Do not expect that GIN index to serve `sortBy`.
 
-// Read component
+## Other `@CompData` options
+
+```typescript
+@CompData(options?: {
+  indexed?: boolean;  // default false. Scalar → bk_ key index. arrayOf → GIN.
+  nullable?: boolean; // default false. Stored as optional.
+  arrayOf?: any;      // element constructor. Not a key index.
+})
+```
+
+`nullable: true` marks the field optional in the archetype input schema. It does not change the key index. A missing key, JSON `null`, and `''` are blank to `FilterOp.IS_NULL`.
+
+## Names
+
+| Kind | Pattern | Example |
+|------|---------|---------|
+| Data | `{Domain}Component` | `EmailComponent` |
+| Tag | `{Domain}Tag` | `AdminTag` |
+| Status | `{Domain}StatusComponent` | `OrderStatusComponent` |
+
+## Do not store a computed total
+
+```typescript
+import { ArcheType, ArcheTypeField, ArcheTypeFunction, BaseArcheType, Entity } from "bunsane";
+
+@ArcheType("Order")
+export class OrderArcheTypeClass extends BaseArcheType {
+  @ArcheTypeField(OrderAmountComponent)
+  amount!: OrderAmountComponent;
+
+  // async methods design-return Promise, so returnType is required.
+  // Scalars: "string" | "number" | "boolean" | "Date". Not "Float" or "String".
+  @ArcheTypeFunction({ returnType: "number" })
+  async total(entity: Entity) {
+    const amount = await entity.get(OrderAmountComponent);
+    return (amount?.subtotal ?? 0) + (amount?.tax ?? 0);
+  }
+}
+```
+
+A list that calls this once per row is an N+1 if `total` queries other entities. Use `{ batch: true }` and return a `Map` keyed by entity id. See [Service patterns](./service-patterns.md).
+
+Opaque blobs you never filter may stay a string. Do not hide queryable fields inside one.
+
+## Read and write
+
+`get()` returns a snapshot. Mutating it does not mark the entity dirty. Merge into `set()`, then `save()`.
+
+```typescript
 const inventory = await product.get(ProductInventoryComponent);
-
-// Update component
+if (!inventory) {
+  throw new Error("Product is missing inventory");
+}
 await product.set(ProductInventoryComponent, {
-    ...inventory,
-    quantity: inventory.quantity - 1,
-    reservedQuantity: inventory.reservedQuantity + 1,
+  ...inventory,
+  quantity: inventory.quantity - 1,
 });
 await product.save();
 ```
 
-## Summary Checklist
+`get()` returns `null` when the component is absent (including a negative-cache tombstone). A database error throws `ComponentLoadError`. It does not return `null`. `has()` is in-memory only. Use `hasPersisted()` for a database check.
 
-When designing a component, verify:
+`remove()` of a component you have not loaded returns `true`. `save()` deletes the row (0.7+).
+
+## Checklist
 
 - [ ] No nested objects in `@CompData()` fields
-- [ ] Fields grouped by access pattern (read together = same component)
-- [ ] Fields grouped by update frequency (updated together = same component)
-- [ ] Frequently queried fields have `{ indexed: true }`
-- [ ] Default values provided for all fields
-- [ ] Component has a single, clear responsibility
-- [ ] Uses tags for boolean-like categorization instead of boolean fields
+- [ ] Fields that change together live on one component
+- [ ] Every filtered or sorted scalar has `{ indexed: true }`
+- [ ] Equality-then-sort uses `@CompositeIndex`, leading column first
+- [ ] Arrays that you contain-filter use GIN (`arrayOf` + `indexed: true`, or `@IndexedField("gin")`)
+- [ ] Defaults on every field
+- [ ] `emitDecoratorMetadata` is on, so `number` fields use `bunsane_num_v1()`. `Date` stays a text key
+- [ ] Hot lists do not depend on empty tags
